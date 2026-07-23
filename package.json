@@ -1,0 +1,25 @@
+{
+  "name": "tally-sync-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Tally Prime → PostgreSQL incremental sync service for Wallnut",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "pm2:start": "pm2 start pm2.config.js",
+    "pm2:stop": "pm2 stop tally-sync",
+    "pm2:logs": "pm2 logs tally-sync",
+    "pm2:status": "pm2 status"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^4.4.1",
+    "node-cron": "^3.0.3",
+    "pg": "^8.12.0"
+  }
+}

@@ -1,0 +1,349 @@
+'use strict';
+
+const { safeStr, safeNum, ensureArray, tallyToIso } = require('../utils/helpers');
+const logger = require('../utils/logger');
+
+/**
+ * tally/parsers.js
+ *
+ * Converts fast-xml-parser output into clean JS arrays ready for DB UPSERT.
+ *
+ * RESILIENCE PRINCIPLES (all parsers follow these):
+ *  1. Every field access uses safeStr() / safeNum() — never throws on missing keys.
+ *  2. Unknown voucher types are stored as-is — no whitelist filtering.
+ *  3. Unknown narration formats fall back to storing the raw narration string.
+ *  4. A single malformed voucher/ledger never aborts the whole batch.
+ *  5. fast-xml-parser returns consistent arrays (configured via isArray callback in client.js).
+ */
+
+// ── Shared XML navigation ──────────────────────────────────────────────────────
+
+/**
+ * Navigates to the data collection inside a parsed Tally XML object.
+ *
+ * Tally Prime can respond with TWO different envelope structures:
+ *
+ *  Structure A (EXPORTDATA — expected, seen in some Tally versions):
+ *    ENVELOPE → BODY → EXPORTDATA → COLLECTION → VOUCHER[]
+ *
+ *  Structure B (IMPORTDATA — what this Tally Prime actually returns):
+ *    ENVELOPE → BODY → IMPORTDATA → REQUESTDATA → TALLYMESSAGE → VOUCHER[]
+ *
+ * This function normalises both into a single object that looks like a COLLECTION:
+ *   { VOUCHER: [...], LEDGER: [...], STOCKITEM: [...] }
+ */
+function getCollection(parsed) {
+  const env  = parsed?.ENVELOPE;
+  const body = env?.BODY;
+  if (!body) return null;
+
+  // ── Structure A: EXPORTDATA / DATA ────────────────────────────────────────
+  const exportData = body.EXPORTDATA || body.DATA;
+  if (exportData) {
+    const col = exportData.COLLECTION || body.DATA?.COLLECTION;
+    if (col) return col;
+  }
+
+  // ── Structure B: IMPORTDATA → REQUESTDATA → TALLYMESSAGE ──────────────────
+  const importData = body.IMPORTDATA;
+  if (importData) {
+    const requestData = importData.REQUESTDATA;
+    if (requestData) {
+      // TALLYMESSAGE may be a single object or an array (handled by ensureArray at call site)
+      const tm = requestData.TALLYMESSAGE;
+      if (!tm) return null;
+      // Merge all TALLYMESSAGE entries into one flat collection object
+      const messages = Array.isArray(tm) ? tm : [tm];
+      const merged = {};
+      for (const msg of messages) {
+        for (const key of Object.keys(msg)) {
+          if (key.startsWith('@_')) continue; // skip xmlns attributes
+          if (merged[key]) {
+            // Append to existing array
+            merged[key] = [
+              ...(Array.isArray(merged[key]) ? merged[key] : [merged[key]]),
+              ...(Array.isArray(msg[key])    ? msg[key]    : [msg[key]]),
+            ];
+          } else {
+            merged[key] = msg[key];
+          }
+        }
+      }
+      return merged;
+    }
+  }
+
+  return null;
+}
+
+// ── Narration parser ────────────────────────────────────────────────────────────
+
+/**
+ * Parses the structured narration format used by this Wallnut Tally setup:
+ *   "Item: <name> | Qty: <n> <unit> | Rate: <r> | Area: <a> | SO: <s> | State: <st>"
+ *
+ * For companies with a different / no narration format, all fields return '' or 0
+ * and itemName falls back to the full narration text (truncated to 200 chars).
+ *
+ * @param {string} narration
+ * @returns {{ itemName, quantity, unit, rate, salesOfficer, areaCity, state }}
+ */
+function parseNarration(narration) {
+  const result = { itemName: '', quantity: 0, unit: '', rate: 0, salesOfficer: '', areaCity: '', state: '' };
+  if (!narration) return result;
+
+  const get = (key) => {
+    const m = narration.match(new RegExp(`${key}:\\s*([^|]+)`, 'i'));
+    return m ? m[1].trim() : '';
+  };
+
+  const isStructured = /Item:/i.test(narration);
+
+  if (isStructured) {
+    result.itemName     = get('Item');
+    const qtyStr        = get('Qty');
+    const qtyParts      = qtyStr.split(/\s+/);
+    result.quantity     = Math.abs(parseFloat(qtyParts[0]) || 0);
+    result.unit         = qtyParts.slice(1).join(' ');
+    result.rate         = parseFloat(get('Rate')) || 0;
+    result.salesOfficer = get('SO');
+    result.areaCity     = get('Area');
+    result.state        = get('State');
+  } else {
+    // Unknown narration format — store as item name (best effort)
+    result.itemName = narration.slice(0, 200);
+  }
+
+  return result;
+}
+
+// ── parseVouchers ──────────────────────────────────────────────────────────────
+
+/**
+ * Parses Tally Day Book XML into voucher records for DB insertion.
+ *
+ * Each record contains:
+ *  - voucher header fields (vchNo, date, vchType, partyName, narration, totalAmount)
+ *  - ledgerEntries[]    — debit/credit ledger lines
+ *  - inventoryEntries[] — stock item lines (if any)
+ *
+ * @param {Object} parsed     fast-xml-parser output
+ * @param {number} companyId  FK for companies.id
+ * @returns {Array}
+ */
+function parseVouchers(parsed, companyId) {
+  const records = [];
+  try {
+    const collection = getCollection(parsed);
+    const vouchers   = ensureArray(collection?.VOUCHER);
+
+    vouchers.forEach((v, idx) => {
+      try {
+        const vchType   = safeStr(v.VOUCHERTYPENAME);
+        const rawDate   = safeStr(v.DATE);
+        const date      = tallyToIso(rawDate) || rawDate;
+        const partyName = safeStr(v.PARTYLEDGERNAME);
+        const vchNo     = safeStr(v.VOUCHERNUMBER) || `AUTO-${idx}-${Date.now()}`;
+        const narration = safeStr(v.NARRATION);
+
+        // ── Extract amount from ledger entries ─────────────────────────────
+        const ledgerLines = ensureArray(v['ALLLEDGERENTRIES.LIST']);
+        let totalAmount = 0;
+        const ledgerEntries = [];
+
+        for (const l of ledgerLines) {
+          const ledgerName      = safeStr(l.LEDGERNAME);
+          const amount          = safeNum(l.AMOUNT);
+          const isParty         = safeStr(l.ISPARTYLEDGER).toLowerCase() === 'yes';
+          const isDeemedPositive= safeStr(l.ISDEEMEDPOSITIVE).toLowerCase() === 'yes';
+
+          // Use the largest absolute amount as the voucher total
+          if (Math.abs(amount) > Math.abs(totalAmount)) {
+            totalAmount = Math.abs(amount);
+          }
+          ledgerEntries.push({ ledgerName, amount, isParty, isDeemedPositive });
+        }
+
+        // ── Extract inventory entries ──────────────────────────────────────
+        const inventoryLines = ensureArray(v['ALLINVENTORYENTRIES.LIST']);
+        const inventoryEntries = [];
+
+        for (const inv of inventoryLines) {
+          const invItemName = safeStr(inv.STOCKITEMNAME);
+          const invQty      = Math.abs(safeNum(inv.ACTUALQTY || inv.BILLEDQTY));
+          const invUnit     = safeStr(inv.UNIT);
+          const invRate     = Math.abs(safeNum(inv.RATE));
+          const invAmount   = Math.abs(safeNum(inv.AMOUNT));
+
+          // Narration gives us sales officer, area, state even when inventory node exists
+          const narParsed   = parseNarration(narration);
+
+          inventoryEntries.push({
+            itemName:     invItemName || narParsed.itemName,
+            quantity:     invQty      || narParsed.quantity,
+            unit:         invUnit     || narParsed.unit,
+            rate:         invRate     || narParsed.rate,
+            amount:       invAmount   || totalAmount,
+            salesOfficer: narParsed.salesOfficer,
+            areaCity:     narParsed.areaCity,
+            state:        narParsed.state,
+          });
+        }
+
+        // ── Fallback: parse narration when no inventory node exists ────────
+        // Handles Wallnut-style Sales vouchers that embed item info in narration
+        if (inventoryEntries.length === 0) {
+          const narParsed = parseNarration(narration);
+          if (narParsed.itemName) {
+            inventoryEntries.push({
+              itemName:     narParsed.itemName,
+              quantity:     narParsed.quantity,
+              unit:         narParsed.unit,
+              rate:         narParsed.rate,
+              amount:       narParsed.rate > 0 && narParsed.quantity > 0
+                              ? narParsed.rate * narParsed.quantity
+                              : totalAmount,
+              salesOfficer: narParsed.salesOfficer,
+              areaCity:     narParsed.areaCity,
+              state:        narParsed.state,
+            });
+          }
+        }
+
+        // Skip vouchers with no date or no voucher number (likely header rows)
+        if (!date || !vchNo) return;
+
+        records.push({
+          companyId,
+          vchNo,
+          date,
+          vchType,
+          partyName,
+          narration,
+          totalAmount,
+          ledgerEntries,
+          inventoryEntries,
+        });
+
+      } catch (innerErr) {
+        logger.warn(`[parsers] Skipped voucher idx=${idx}: ${innerErr.message}`);
+      }
+    });
+
+  } catch (outerErr) {
+    logger.error(`[parsers] parseVouchers outer error: ${outerErr.message}`);
+  }
+
+  return records;
+}
+
+// ── parseLedgers ───────────────────────────────────────────────────────────────
+
+/**
+ * Parses List of Accounts XML into ledger master records.
+ * Stores ALL accounts regardless of group — parent_group column is used later
+ * by the AWS API to distinguish customers, suppliers, banks, etc.
+ *
+ * @param {Object} parsed
+ * @param {number} companyId
+ * @returns {Array}
+ */
+function parseLedgers(parsed, companyId) {
+  const records = [];
+  try {
+    const collection = getCollection(parsed);
+    const ledgers    = ensureArray(collection?.LEDGER);
+
+    ledgers.forEach((l) => {
+      try {
+        // Tally puts the ledger name as an XML attribute NAME="..." AND as a child element
+        const name           = safeStr(l['@_NAME'] || l.NAME);
+        const parentGroup    = safeStr(l.PARENT);
+        const closingBalance = safeNum(l.CLOSINGBALANCE);
+        const gstNo          = safeStr(l.GSTREGISTRATIONNUMBER || l.GSTIN);
+        const state          = safeStr(l.STATENAME || l.STATE);
+
+        if (!name) return; // Skip empty rows
+
+        records.push({ companyId, name, parentGroup, closingBalance, gstNo, state });
+      } catch (e) {
+        logger.warn(`[parsers] Skipped ledger: ${e.message}`);
+      }
+    });
+  } catch (e) {
+    logger.error(`[parsers] parseLedgers error: ${e.message}`);
+  }
+  return records;
+}
+
+// ── parseStockItems ────────────────────────────────────────────────────────────
+
+/**
+ * Parses Stock Summary XML into stock item records.
+ *
+ * @param {Object} parsed
+ * @param {number} companyId
+ * @returns {Array}
+ */
+function parseStockItems(parsed, companyId) {
+  const records = [];
+  try {
+    const collection = getCollection(parsed);
+    const items      = ensureArray(collection?.STOCKITEM);
+
+    items.forEach((item) => {
+      try {
+        const name         = safeStr(item['@_NAME'] || item.NAME);
+        const parentGroup  = safeStr(item.PARENT);
+        const baseUnit     = safeStr(item.BASEUNITS);
+        const closingQty   = Math.abs(safeNum(item.CLOSINGBALANCE));
+        const closingValue = Math.abs(safeNum(item.CLOSINGVALUE));
+
+        if (!name) return;
+
+        records.push({ companyId, name, parentGroup, baseUnit, closingQty, closingValue });
+      } catch (e) {
+        logger.warn(`[parsers] Skipped stock item: ${e.message}`);
+      }
+    });
+  } catch (e) {
+    logger.error(`[parsers] parseStockItems error: ${e.message}`);
+  }
+  return records;
+}
+
+// ── parseOutstanding ──────────────────────────────────────────────────────────
+
+/**
+ * Parses Outstanding Receivables XML.
+ * Only includes parties with a positive closing balance (they owe us money).
+ *
+ * @param {Object} parsed
+ * @param {number} companyId
+ * @returns {Array}
+ */
+function parseOutstanding(parsed, companyId) {
+  const records = [];
+  try {
+    const collection = getCollection(parsed);
+    const ledgers    = ensureArray(collection?.LEDGER);
+
+    ledgers.forEach((l) => {
+      try {
+        const partyName        = safeStr(l['@_NAME'] || l.NAME);
+        const totalOutstanding = safeNum(l.CLOSINGBALANCE);
+
+        if (!partyName || totalOutstanding <= 0) return;
+
+        records.push({ companyId, partyName, totalOutstanding });
+      } catch (e) {
+        logger.warn(`[parsers] Skipped outstanding entry: ${e.message}`);
+      }
+    });
+  } catch (e) {
+    logger.error(`[parsers] parseOutstanding error: ${e.message}`);
+  }
+  return records;
+}
+
+module.exports = { parseVouchers, parseLedgers, parseStockItems, parseOutstanding };
