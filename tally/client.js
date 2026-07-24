@@ -8,13 +8,7 @@ const logger         = require('../utils/logger');
 /**
  * tally/client.js
  * Low-level HTTP client for the Tally Prime XML API.
- *
- * fast-xml-parser is used instead of xml2js:
- *   - ~3× faster for large Day Book responses
- *   - Lower memory footprint (important on 4 GB VM)
- *
- * The `isArray` callback ensures collection nodes are always arrays,
- * so parsers never need to guard against single-element non-arrays.
+ * Includes retry logic for ECONNRESET errors (Tally drops large responses).
  */
 
 const ALWAYS_ARRAY = new Set([
@@ -37,17 +31,36 @@ const xmlParser = new XMLParser({
 
 /**
  * POSTs raw XML to Tally Prime and returns the raw response string.
+ * Retries up to 3 times on ECONNRESET (Tally drops connection on large responses).
  * @param {string} xml
+ * @param {number} [retries=3]
  * @returns {Promise<string>}
  */
-async function request(xml) {
-  const response = await axios.post(config.tally.baseUrl, xml, {
-    headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
-    timeout: config.tally.timeout,
-    // Return raw string — do NOT let axios try to parse XML
-    responseType: 'text',
-  });
-  return response.data;
+async function request(xml, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      logger.info(`[tally] Sending request (attempt ${attempt}/${retries}) → ${config.tally.baseUrl}`);
+      const response = await axios.post(config.tally.baseUrl, xml, {
+        headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
+        timeout: config.tally.timeout,
+        responseType: 'text',
+      });
+      logger.info(`[tally] Response received: ${response.data.length} bytes`);
+      return response.data;
+    } catch (err) {
+      const isConnReset = err.code === 'ECONNRESET' || err.message?.includes('ECONNRESET');
+      const isTimeout   = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+
+      if ((isConnReset || isTimeout) && attempt < retries) {
+        const waitMs = attempt * 3000; // 3s, 6s backoff
+        logger.warn(`[tally] ${err.code || 'ERROR'} on attempt ${attempt} — retrying in ${waitMs / 1000}s...`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      // Final attempt or non-retryable error
+      throw err;
+    }
+  }
 }
 
 /**
@@ -61,7 +74,6 @@ function parseXml(rawXml) {
 
 /**
  * Checks if Tally Prime is reachable on the configured port.
- * Does NOT require a specific company to be loaded.
  * @returns {Promise<boolean>}
  */
 async function ping() {
