@@ -52,16 +52,34 @@ async function request(xml, retries = 3) {
       const isTimeout   = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
 
       if ((isConnReset || isTimeout) && attempt < retries) {
-        const waitMs = attempt * 3000; // 3s, 6s backoff
+        const waitMs = attempt * 3000;
         logger.warn(`[tally] ${err.code || 'ERROR'} on attempt ${attempt} — retrying in ${waitMs / 1000}s...`);
         await new Promise(r => setTimeout(r, waitMs));
         continue;
       }
-      // Final attempt or non-retryable error
       throw err;
     }
   }
 }
+
+/**
+ * POSTs raw XML to Tally Prime and returns a STREAMING response.
+ * Use this for large responses (ledgers, outstanding) to avoid buffering.
+ * The caller is responsible for consuming/piping the stream.
+ * @param {string} xml
+ * @returns {Promise<import('stream').Readable>}
+ */
+async function requestStream(xml) {
+  logger.info(`[tally] Opening stream → ${config.tally.baseUrl}`);
+  const response = await axios.post(config.tally.baseUrl, xml, {
+    headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
+    timeout: config.tally.timeout,
+    responseType: 'stream',
+  });
+  logger.info(`[tally] Stream opened (content-length: ${response.headers['content-length'] || 'unknown'})`);
+  return response.data; // Node.js Readable stream
+}
+
 
 /**
  * Parses a Tally XML string into a JS object using fast-xml-parser.
@@ -101,4 +119,5 @@ async function ping() {
   }
 }
 
-module.exports = { request, parseXml, ping };
+module.exports = { request, requestStream, parseXml, ping };
+

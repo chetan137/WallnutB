@@ -169,36 +169,51 @@ async function syncVouchers(company) {
   }
 }
 
-// ── Ledger Masters ─────────────────────────────────────────────────────────────
+// ── Ledger Masters (STREAMING) ────────────────────────────────────────────────
+// Uses SAX streaming parser — never loads 55 MB into memory.
+// Shows real-time download + parse progress every 2 MB.
 
 async function syncLedgers(company) {
   const { id: companyId, tally_name: tallyName } = company;
   const t0 = Date.now();
   logStep('LEDGERS', `start — company: "${company.name}"`);
   await syncLogs.startSync(companyId, 'ledgers');
-  try {
-    logStep('LEDGERS', '📡 sending to Tally...');
-    const fetchStart = Date.now();
-    const xml  = templates.buildLedgerMasterRequest(tallyName);
-    const raw  = await tallyClient.request(xml);
-    logStep('LEDGERS', `📥 got ${humanBytes(raw.length)} in ${humanMs(Date.now()-fetchStart)}`);
 
-    const estTime = estimateParseTime(raw.length);
-    logStep('LEDGERS', `⚙️  parsing ${humanBytes(raw.length)} — NOTE: output pauses here ${estTime} (normal for large data)`);
-    const parseStart = Date.now();
-    const parsed  = tallyClient.parseXml(raw);
-    const records = parsers.parseLedgers(parsed, companyId);
-    logStep('LEDGERS', `✅ parsed ${records.length} ledgers in ${humanMs(Date.now()-parseStart)}`);
+  try {
+    // ── Open streaming HTTP connection to Tally ───────────────────────────
+    logStep('LEDGERS', '📡 opening stream to Tally (large response expected)...');
+    const xml    = templates.buildLedgerMasterRequest(tallyName);
+    const stream = await tallyClient.requestStream(xml);
+
+    // ── Stream-parse: download + SAX parse simultaneously ────────────────
+    logStep('LEDGERS', '⚙️  streaming download + parsing simultaneously...');
+    let lastLoggedMB = 0;
+
+    const { streamParseLedgers } = require('../tally/streamParser');
+
+    const records = await streamParseLedgers(stream, companyId, (bytesReceived, recordsParsed) => {
+      const mb = bytesReceived / (1024 * 1024);
+      if (mb - lastLoggedMB >= 4) {   // log every 4 MB
+        logStep('LEDGERS',
+          `📥 downloaded ${mb.toFixed(1)} MB | parsed ${recordsParsed} ledgers so far | ` +
+          `elapsed: ${humanMs(Date.now() - t0)}`
+        );
+        lastLoggedMB = mb;
+      }
+    });
+
+    logStep('LEDGERS', `✅ stream complete — ${records.length} ledgers parsed in ${humanMs(Date.now() - t0)}`);
 
     if (records.length === 0) {
       await syncLogs.successSync(companyId, 'ledgers', todayIso(), { fetched: 0, upserted: 0 });
-      logStep('LEDGERS', '⏭  0 records from Tally');
+      logStep('LEDGERS', '⏭  0 ledgers found in Tally response');
       return;
     }
 
-    logStep('LEDGERS', `💾 writing ${records.length} ledgers inside 1 transaction...`);
+    // ── DB Upsert inside single transaction (fast) ───────────────────────
+    logStep('LEDGERS', `💾 writing ${records.length} ledgers to DB (1 transaction)...`);
     const dbStart = Date.now();
-    let upserted = 0;
+    let upserted  = 0;
 
     await withTransaction(async (client) => {
       for (const r of records) {
@@ -219,11 +234,14 @@ async function syncLedgers(company) {
 
     await syncLogs.successSync(companyId, 'ledgers', todayIso(), { fetched: records.length, upserted });
     logStep('LEDGERS ✅', `${upserted} in DB | DB write: ${humanMs(Date.now()-dbStart)} | total: ${humanMs(Date.now()-t0)}`);
+
   } catch (err) {
     await syncLogs.failSync(companyId, 'ledgers', err.message);
     logger.error(`[syncEngine] ❌ LEDGERS FAILED "${company.name}": ${err.message}`);
+    logger.error(err.stack);
   }
 }
+
 
 // ── Stock Items ────────────────────────────────────────────────────────────────
 
