@@ -279,7 +279,16 @@ function parseLedgers(parsed, companyId) {
 // ── parseStockItems ────────────────────────────────────────────────────────────
 
 /**
- * Parses Stock Summary XML into stock item records.
+ * Parses Stock Summary (or Stock Item collection) XML into stock records.
+ *
+ * Tally's "Stock Summary" report returns a DSP display format:
+ *   <DSPACCNAME><DSPDISPNAME>GroupName</DSPDISPNAME></DSPACCNAME>
+ *   <DSPSTKINFO><DSPSTKCL><DSPCLQTY>77923.519 Nos.</DSPCLQTY><DSPCLAMTA>-118520.58</DSPCLAMTA></DSPSTKCL></DSPSTKINFO>
+ *
+ * DSPACCNAME[i] always pairs with DSPSTKINFO[i] in document order.
+ * Items without a quantity string are stock groups (we store them too for completeness).
+ *
+ * Falls back to standard STOCKITEM collection format if present.
  *
  * @param {Object} parsed
  * @param {number} companyId
@@ -288,24 +297,61 @@ function parseLedgers(parsed, companyId) {
 function parseStockItems(parsed, companyId) {
   const records = [];
   try {
+    // ── Try standard STOCKITEM collection format first ────────────────────
     const collection = getCollection(parsed);
     const items      = ensureArray(collection?.STOCKITEM);
 
-    items.forEach((item) => {
-      try {
-        const name         = safeStr(item['@_NAME'] || item.NAME);
-        const parentGroup  = safeStr(item.PARENT);
-        const baseUnit     = safeStr(item.BASEUNITS);
-        const closingQty   = Math.abs(safeNum(item.CLOSINGBALANCE));
-        const closingValue = Math.abs(safeNum(item.CLOSINGVALUE));
+    if (items.length > 0) {
+      items.forEach((item) => {
+        try {
+          const name         = safeStr(item['@_NAME'] || item.NAME);
+          const parentGroup  = safeStr(item.PARENT);
+          const baseUnit     = safeStr(item.BASEUNITS);
+          const closingQty   = Math.abs(safeNum(item.CLOSINGBALANCE));
+          const closingValue = Math.abs(safeNum(item.CLOSINGVALUE));
+          if (!name) return;
+          records.push({ companyId, name, parentGroup, baseUnit, closingQty, closingValue });
+        } catch (e) {
+          logger.warn(`[parsers] Skipped stock item: ${e.message}`);
+        }
+      });
+      return records;
+    }
 
+    // ── Fall back to DSP display format (Stock Summary report) ────────────
+    // Tally returns alternating DSPACCNAME + DSPSTKINFO pairs at ENVELOPE level.
+    const env = parsed?.ENVELOPE;
+    if (!env) return records;
+
+    const names = ensureArray(env.DSPACCNAME);
+    const infos = ensureArray(env.DSPSTKINFO);
+
+    names.forEach((nameNode, idx) => {
+      try {
+        const name    = safeStr(nameNode?.DSPDISPNAME);
         if (!name) return;
 
-        records.push({ companyId, name, parentGroup, baseUnit, closingQty, closingValue });
+        const cl      = infos[idx]?.DSPSTKCL || {};
+        const qtyStr  = safeStr(cl.DSPCLQTY).trim();        // e.g. "77923.519 Nos."
+        const qty     = parseFloat(qtyStr) || 0;
+        // Extract unit from qty string (everything after the number)
+        const unitMatch = qtyStr.match(/^[\d.,\s]+(.+)$/);
+        const unit    = unitMatch ? unitMatch[1].trim() : '';
+        const value   = Math.abs(safeNum(cl.DSPCLAMTA));
+
+        records.push({
+          companyId,
+          name,
+          parentGroup:  '',   // Not available in Stock Summary display format
+          baseUnit:     unit,
+          closingQty:   qty,
+          closingValue: value,
+        });
       } catch (e) {
-        logger.warn(`[parsers] Skipped stock item: ${e.message}`);
+        logger.warn(`[parsers] Skipped DSP stock item idx=${idx}: ${e.message}`);
       }
     });
+
   } catch (e) {
     logger.error(`[parsers] parseStockItems error: ${e.message}`);
   }

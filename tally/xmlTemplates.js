@@ -79,11 +79,11 @@ function buildLedgerMasterRequest(companyName) {
 }
 
 /**
- * Fetch Stock Items using TDL Collection export.
+ * Fetch Stock Groups & Items from Stock Summary report.
  *
- * WHY NOT "Stock Summary": That report returns a display-format (DSPACCNAME/DSPDISPNAME)
- * which cannot be parsed as structured data. TDL COLLECTION exports raw STOCKITEM objects
- * with NAME/PARENT/BASEUNITS/CLOSINGBALANCE/CLOSINGVALUE — matching our DB schema exactly.
+ * NOTE: TallyPrime's XML API does not support inline TDL for custom collection exports.
+ * "Stock Summary" is the only accessible report. It returns DSP display format
+ * (DSPACCNAME/DSPDISPNAME + DSPSTKINFO) which parsers.js handles correctly.
  *
  * @param {string} companyName
  * @returns {string}
@@ -97,24 +97,17 @@ function buildStockItemsRequest(companyName) {
   <BODY>
     <EXPORTDATA>
       <REQUESTDESC>
-        <REPORTNAME>WALLNUT_STOCK_EXPORT</REPORTNAME>
+        <REPORTNAME>Stock Summary</REPORTNAME>
         <STATICVARIABLES>
           <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
           <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         </STATICVARIABLES>
-        <TDL>
-          <TDLMESSAGE>
-            <COLLECTION NAME="WALLNUT_STOCK_EXPORT">
-              <TYPE>Stock Item</TYPE>
-              <FETCH>Name, Parent, BaseUnits, ClosingBalance, ClosingValue</FETCH>
-            </COLLECTION>
-          </TDLMESSAGE>
-        </TDL>
       </REQUESTDESC>
     </EXPORTDATA>
   </BODY>
 </ENVELOPE>`;
 }
+
 
 
 /**

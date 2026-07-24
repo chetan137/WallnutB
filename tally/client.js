@@ -15,10 +15,12 @@ const ALWAYS_ARRAY = new Set([
   'VOUCHER',
   'LEDGER',
   'STOCKITEM',
-  'TALLYMESSAGE',           // Tally IMPORTDATA wraps data in TALLYMESSAGE nodes
+  'TALLYMESSAGE',
   'ALLLEDGERENTRIES.LIST',
   'ALLINVENTORYENTRIES.LIST',
   'BILLALLOCATIONS.LIST',
+  'DSPACCNAME',   // Stock Summary display format
+  'DSPSTKINFO',   // Stock Summary display format
 ]);
 
 const xmlParser = new XMLParser({
