@@ -79,7 +79,11 @@ function buildLedgerMasterRequest(companyName) {
 }
 
 /**
- * Fetch Stock Summary (all stock items with closing qty and value).
+ * Fetch Stock Items using TDL Collection export.
+ *
+ * WHY NOT "Stock Summary": That report returns a display-format (DSPACCNAME/DSPDISPNAME)
+ * which cannot be parsed as structured data. TDL COLLECTION exports raw STOCKITEM objects
+ * with NAME/PARENT/BASEUNITS/CLOSINGBALANCE/CLOSINGVALUE — matching our DB schema exactly.
  *
  * @param {string} companyName
  * @returns {string}
@@ -93,16 +97,25 @@ function buildStockItemsRequest(companyName) {
   <BODY>
     <EXPORTDATA>
       <REQUESTDESC>
-        <REPORTNAME>Stock Summary</REPORTNAME>
+        <REPORTNAME>WALLNUT_STOCK_EXPORT</REPORTNAME>
         <STATICVARIABLES>
           <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
           <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         </STATICVARIABLES>
+        <TDL>
+          <TDLMESSAGE>
+            <COLLECTION NAME="WALLNUT_STOCK_EXPORT">
+              <TYPE>Stock Item</TYPE>
+              <FETCH>Name, Parent, BaseUnits, ClosingBalance, ClosingValue</FETCH>
+            </COLLECTION>
+          </TDLMESSAGE>
+        </TDL>
       </REQUESTDESC>
     </EXPORTDATA>
   </BODY>
 </ENVELOPE>`;
 }
+
 
 /**
  * Fetch Outstanding Receivables snapshot.
