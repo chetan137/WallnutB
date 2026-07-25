@@ -157,6 +157,42 @@ CREATE TABLE IF NOT EXISTS bills_payable (
   UNIQUE (company_id, party_name, bill_ref)
 );
 
+-- ─── Bills Receivable ─────────────────────────────────────────────────────────
+-- Individual bill-level RECEIVABLE records from Tally's "Bills Receivable" report.
+-- EXACT same structure as bills_payable — one row per outstanding customer invoice.
+-- Gives aging: overdue_days > 0 = the customer is late on payment.
+-- Replaced fully on each daily master sync.
+CREATE TABLE IF NOT EXISTS bills_receivable (
+  id            SERIAL PRIMARY KEY,
+  company_id    INT  NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  party_name    TEXT NOT NULL,
+  bill_ref      TEXT NOT NULL,
+  bill_date     DATE,
+  amount        NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  due_date      DATE,
+  overdue_days  INT  NOT NULL DEFAULT 0,
+  synced_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, party_name, bill_ref)
+);
+
+-- ─── Cash Flow Items ──────────────────────────────────────────────────────────
+-- Line items from Tally's "Receipts and Payments" report.
+-- Powers the Cash Flow panel: Inflow, Outflow, Net Cash Flow.
+-- Tags: DSPDISPNAME (group name), RPMAINAMT (total), RPSUBAMT (sub-item)
+-- positive RPMAINAMT = receipt / inflow, negative = payment / outflow
+-- Replaced fully on each daily master sync.
+CREATE TABLE IF NOT EXISTS cash_flow_items (
+  id           SERIAL PRIMARY KEY,
+  company_id   INT   NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  item_name    TEXT  NOT NULL,
+  main_amount  NUMERIC(15, 2) NOT NULL DEFAULT 0,  -- RPMAINAMT
+  sub_amount   NUMERIC(15, 2) NOT NULL DEFAULT 0,  -- RPSUBAMT
+  period_from  DATE  NOT NULL,
+  period_to    DATE  NOT NULL,
+  synced_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, item_name, period_from, period_to)
+);
+
 -- ─── Trial Balance Groups ─────────────────────────────────────────────────────
 -- Group-level Dr/Cr closing balances from Tally's Trial Balance report.
 -- This is the AUTHORITATIVE source for P&L and Balance Sheet totals.

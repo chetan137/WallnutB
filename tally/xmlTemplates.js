@@ -229,6 +229,64 @@ function buildProfitAndLossRequest(companyName, fromDate, toDate) {
 </ENVELOPE>`;
 }
 
+/**
+ * Fetch Bills Receivable (outstanding customer bills with aging).
+ * EXACT same XML structure as Bills Payable:
+ *   BILLFIXED { BILLDATE, BILLREF, BILLPARTY } + BILLCL + BILLDUE + BILLOVERDUE
+ * parseBillsPayable() can be reused directly.
+ *
+ * @param {string} companyName
+ * @returns {string}
+ */
+function buildBillsReceivableRequest(companyName) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Bills Receivable</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+}
+
+/**
+ * Fetch Receipts and Payments report.
+ * Gives cash Inflow, Outflow, and Net Flow by account group.
+ * XML tags: DSPDISPNAME (group), RPMAINAMT (total), RPSUBAMT (sub-item)
+ * positive RPMAINAMT = receipt/inflow, negative = payment/outflow
+ *
+ * @param {string} companyName
+ * @param {string} fromDate  ISO "YYYY-MM-DD"
+ * @param {string} toDate    ISO "YYYY-MM-DD"
+ * @returns {string}
+ */
+function buildReceiptsAndPaymentsRequest(companyName, fromDate, toDate) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Receipts and Payments</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
+          <SVTODATE>${isoToTally(toDate)}</SVTODATE>
+          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+}
+
 module.exports = {
   buildAllVouchersRequest,
   buildLedgerMasterRequest,
@@ -237,4 +295,6 @@ module.exports = {
   buildTrialBalanceRequest,
   buildOutstandingPayablesRequest,
   buildProfitAndLossRequest,
+  buildBillsReceivableRequest,
+  buildReceiptsAndPaymentsRequest,
 };

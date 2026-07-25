@@ -557,6 +557,113 @@ async function syncBillsPayable(company) {
   }
 }
 
+// ── Bills Receivable ──────────────────────────────────────────────────────────
+// Outstanding customer invoices with aging (same XML as Bills Payable).
+// Gives: total receivables, overdue receivables, customer-wise breakdown.
+// parseBillsPayable() is reused — identical XML tag structure.
+async function syncBillsReceivable(company) {
+  const { id: companyId, tally_name: tallyName } = company;
+  const t0 = Date.now();
+  logStep('BILLS RCV', `start — company: "${company.name}"`);
+
+  try {
+    const xml = templates.buildBillsReceivableRequest(tallyName);
+    const raw = await tallyClient.request(xml);
+
+    if (!raw || raw.trim() === '<ENVELOPE></ENVELOPE>') {
+      logStep('BILLS RCV', '⏭  empty response — no receivables');
+      return;
+    }
+
+    // parseBillsPayable works perfectly — same XML structure
+    const records = parsers.parseBillsPayable(raw, companyId);
+    logStep('BILLS RCV', `parsed ${records.length} receivable bills`);
+
+    if (records.length === 0) {
+      logStep('BILLS RCV', '⏭  0 receivable bills found');
+      return;
+    }
+
+    await withTransaction(async (client) => {
+      await client.query('DELETE FROM bills_receivable WHERE company_id=$1', [companyId]);
+      for (const r of records) {
+        await client.query(`
+          INSERT INTO bills_receivable
+            (company_id, party_name, bill_ref, bill_date, amount, due_date, overdue_days, synced_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+          ON CONFLICT (company_id, party_name, bill_ref)
+          DO UPDATE SET amount=EXCLUDED.amount, due_date=EXCLUDED.due_date,
+            overdue_days=EXCLUDED.overdue_days, synced_at=NOW()
+        `, [companyId, r.partyName, r.billRef, r.billDate, r.amount, r.dueDate, r.overdueDays]);
+      }
+    });
+
+    logStep('BILLS RCV ✅', `${records.length} bills | total: ${humanMs(Date.now()-t0)}`);
+  } catch (err) {
+    logger.error(`[syncEngine] ❌ BILLS RCV FAILED "${company.name}": ${err.message}`);
+  }
+}
+
+// ── Receipts and Payments (Cash Flow) ──────────────────────────────────────
+// Fetches Receipts & Payments report to power the Cash Flow dashboard panel.
+// Tags: DSPDISPNAME (group name), RPMAINAMT (total), RPSUBAMT (sub-item)
+// Positive RPMAINAMT = Receipt/Inflow, Negative = Payment/Outflow.
+async function syncReceiptsAndPayments(company) {
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, is_historical } = company;
+  const t0 = Date.now();
+  logStep('CASH FLOW', `start — company: "${company.name}"`);
+
+  try {
+    const fromDate = fiscal_year_from
+      ? (fiscal_year_from instanceof Date
+          ? fiscal_year_from.toISOString().slice(0, 10)
+          : String(fiscal_year_from).slice(0, 10))
+      : '2024-04-01';
+    const toDate = is_historical ? endOfFiscalYear(fromDate) : todayIso();
+
+    const xml = templates.buildReceiptsAndPaymentsRequest(tallyName, fromDate, toDate);
+    const raw = await tallyClient.request(xml);
+
+    // Parse paired blocks: DSPDISPNAME + RPSUBAMT + RPMAINAMT
+    // Same paired-block approach as P&L (BSMAINAMT → RPMAINAMT)
+    const blockRegex = /<DSPDISPNAME>([^<]*)<\/DSPDISPNAME>[\s\S]*?<RPSUBAMT>([^<]*)<\/RPSUBAMT>[\s\S]*?<RPMAINAMT>([^<]*)<\/RPMAINAMT>/g;
+    const records = [];
+    let match;
+    while ((match = blockRegex.exec(raw)) !== null) {
+      const itemName   = match[1].trim();
+      const subAmount  = parseFloat(match[2]) || 0;
+      const mainAmount = parseFloat(match[3]) || 0;
+      if (itemName) records.push({ itemName, mainAmount, subAmount });
+    }
+
+    if (records.length === 0) {
+      logStep('CASH FLOW', '⚠️  no items found in Receipts & Payments response');
+      return;
+    }
+
+    await withTransaction(async (client) => {
+      await client.query(
+        'DELETE FROM cash_flow_items WHERE company_id=$1 AND period_from=$2 AND period_to=$3',
+        [companyId, fromDate, toDate]
+      );
+      for (const r of records) {
+        await client.query(`
+          INSERT INTO cash_flow_items
+            (company_id, item_name, main_amount, sub_amount, period_from, period_to, synced_at)
+          VALUES ($1,$2,$3,$4,$5,$6,NOW())
+          ON CONFLICT (company_id, item_name, period_from, period_to)
+          DO UPDATE SET main_amount=EXCLUDED.main_amount, sub_amount=EXCLUDED.sub_amount,
+            synced_at=NOW()
+        `, [companyId, r.itemName, r.mainAmount, r.subAmount, fromDate, toDate]);
+      }
+    });
+
+    logStep('CASH FLOW ✅', `${records.length} items | ${humanMs(Date.now()-t0)}`);
+  } catch (err) {
+    logger.error(`[syncEngine] ❌ CASH FLOW FAILED "${company.name}": ${err.message}`);
+  }
+}
+
 // ── Compute Closing Balances ───────────────────────────────────────────────────
 // CLOSINGBALANCE is not exported by Tally's List of Accounts API.
 // Formula: closing_balance = opening_balance + SUM(all ledger entries in vouchers this year)
@@ -661,11 +768,13 @@ async function runSyncCycle({ includeMasters = false } = {}) {
 
     // ── Step D: Masters (only on startup/daily OR first-ever sync) ───────────
     if (includeMasters || !company.initial_sync_done) {
-      logger.info(`[syncEngine]   [masters: ledgers → stock items → outstanding → bills payable → closing balances]`);
+      logger.info(`[syncEngine]   [masters: ledgers → stock → outstanding → bills payable → bills receivable → cash flow → closing balances]`);
       await syncLedgers(company);
       await syncStockItems(company);
       await syncOutstanding(company);
       await syncBillsPayable(company);
+      await syncBillsReceivable(company);
+      await syncReceiptsAndPayments(company);
       await computeClosingBalances(company);
     } else {
       // Incremental run: recompute closing balances from fresh voucher entries
@@ -681,4 +790,9 @@ async function runSyncCycle({ includeMasters = false } = {}) {
   logger.info('[syncEngine] ════════════════════════════════════════════');
 }
 
-module.exports = { runSyncCycle, syncVouchers, syncLedgers, syncStockItems, syncOutstanding, syncBillsPayable, syncTrialBalance, syncProfitAndLoss };
+module.exports = {
+  runSyncCycle,
+  syncVouchers, syncLedgers, syncStockItems,
+  syncOutstanding, syncBillsPayable, syncBillsReceivable,
+  syncReceiptsAndPayments, syncTrialBalance, syncProfitAndLoss,
+};
