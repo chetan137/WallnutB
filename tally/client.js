@@ -16,12 +16,14 @@ const ALWAYS_ARRAY = new Set([
   'LEDGER',
   'STOCKITEM',
   'TALLYMESSAGE',
-  'ALLLEDGERENTRIES.LIST',
+  'LEDGERENTRIES.LIST',       // TallyPrime Day Book — actual ledger entry tag
+  'ALLLEDGERENTRIES.LIST',    // Kept for compatibility with older Tally versions
   'ALLINVENTORYENTRIES.LIST',
   'BILLALLOCATIONS.LIST',
-  'DSPACCNAME',   // Stock Summary display format
-  'DSPSTKINFO',   // Stock Summary display format
+  'DSPACCNAME',               // Stock Summary display format
+  'DSPSTKINFO',               // Stock Summary display format
 ]);
+
 
 const xmlParser = new XMLParser({
   ignoreAttributes:    false,

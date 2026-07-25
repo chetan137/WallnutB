@@ -76,6 +76,49 @@ function getCollection(parsed) {
   return null;
 }
 
+// ── Qty / Rate string parser ────────────────────────────────────────────────────
+
+/**
+ * Parses Tally's complex quantity strings into qty + unit.
+ *
+ * Examples:
+ *   "6000.000 Kgs =  300.000 Bags"  → { qty: 300, unit: 'Bags' }  (uses alt UOM after '=')
+ *   "300.000 Bags"                   → { qty: 300, unit: 'Bags' }
+ *   "6000.000 Kgs"                   → { qty: 6000, unit: 'Kgs' }
+ *
+ * @param {string|number} raw
+ * @returns {{ qty: number, unit: string }}
+ */
+function parseQtyString(raw) {
+  const str = String(raw || '').trim();
+  if (!str) return { qty: 0, unit: '' };
+
+  // If string has '=', take the part after '=' (alternate UOM — usually the billing unit)
+  const eqIdx = str.indexOf('=');
+  const part   = eqIdx >= 0 ? str.slice(eqIdx + 1).trim() : str;
+
+  const qty        = parseFloat(part) || 0;
+  // Unit = everything after the leading number (e.g. " Bags", " Kgs")
+  const unitMatch  = part.match(/^[\d.,\s]+([A-Za-z].*?)\s*$/);
+  const unit       = unitMatch ? unitMatch[1].trim() : '';
+  return { qty, unit };
+}
+
+/**
+ * Parses Tally's rate strings into a number.
+ *
+ * Examples:
+ *   "242.00/Bags"  → 242
+ *   "280.00/Bags"  → 280
+ *   1500           → 1500
+ *
+ * @param {string|number} raw
+ * @returns {number}
+ */
+function parseRateString(raw) {
+  return Math.abs(parseFloat(String(raw || '')) || 0);
+}
+
 // ── Narration parser ────────────────────────────────────────────────────────────
 
 /**
@@ -146,68 +189,76 @@ function parseVouchers(parsed, companyId) {
         const vchNo     = safeStr(v.VOUCHERNUMBER) || `AUTO-${idx}-${Date.now()}`;
         const narration = safeStr(v.NARRATION);
 
-        // ── Extract amount from ledger entries ─────────────────────────────
-        const ledgerLines = ensureArray(v['ALLLEDGERENTRIES.LIST']);
-        let totalAmount = 0;
+        // ── Extract ledger entries (LEDGERENTRIES.LIST is the correct Tally field) ──
+        // NOTE: We tried ALLLEDGERENTRIES.LIST — it does NOT exist in TallyPrime Day Book.
+        // The actual field name is LEDGERENTRIES.LIST (confirmed via raw XML inspection).
+        const ledgerLines   = ensureArray(v['LEDGERENTRIES.LIST']);
+        let totalAmount     = 0;
         const ledgerEntries = [];
 
         for (const l of ledgerLines) {
-          const ledgerName      = safeStr(l.LEDGERNAME);
-          const amount          = safeNum(l.AMOUNT);
-          const isParty         = safeStr(l.ISPARTYLEDGER).toLowerCase() === 'yes';
-          const isDeemedPositive= safeStr(l.ISDEEMEDPOSITIVE).toLowerCase() === 'yes';
+          if (typeof l !== 'object' || l === null) continue;
+          const ledgerName       = safeStr(l.LEDGERNAME);
+          const amount           = safeNum(l.AMOUNT);
+          const isParty          = safeStr(l.ISPARTYLEDGER).toLowerCase() === 'yes';
+          const isDeemedPositive = safeStr(l.ISDEEMEDPOSITIVE).toLowerCase() === 'yes';
 
-          // Use the largest absolute amount as the voucher total
-          if (Math.abs(amount) > Math.abs(totalAmount)) {
+          // totalAmount = party ledger's abs amount (that's the invoice total).
+          // Fall back to max abs amount if no party ledger is flagged.
+          if (isParty && Math.abs(amount) > 0) {
+            totalAmount = Math.abs(amount);
+          } else if (totalAmount === 0 && Math.abs(amount) > Math.abs(totalAmount)) {
             totalAmount = Math.abs(amount);
           }
+
           ledgerEntries.push({ ledgerName, amount, isParty, isDeemedPositive });
         }
 
-        // ── Extract inventory entries ──────────────────────────────────────
-        const inventoryLines = ensureArray(v['ALLINVENTORYENTRIES.LIST']);
+        // ── Extract inventory entries (ALLINVENTORYENTRIES.LIST) ──────────
+        // Tally qty strings: "6000.000 Kgs =  300.000 Bags" → 300 Bags
+        // Tally rate strings: "242.00/Bags" → 242
+        const inventoryLines   = ensureArray(v['ALLINVENTORYENTRIES.LIST']);
         const inventoryEntries = [];
+        const narParsed        = parseNarration(narration);
 
         for (const inv of inventoryLines) {
-          const invItemName = safeStr(inv.STOCKITEMNAME);
-          const invQty      = Math.abs(safeNum(inv.ACTUALQTY || inv.BILLEDQTY));
-          const invUnit     = safeStr(inv.UNIT);
-          const invRate     = Math.abs(safeNum(inv.RATE));
-          const invAmount   = Math.abs(safeNum(inv.AMOUNT));
+          // Skip empty placeholder nodes (Tally writes empty LIST tags for service vouchers)
+          if (typeof inv !== 'object' || inv === null || Object.keys(inv).length === 0) continue;
 
-          // Narration gives us sales officer, area, state even when inventory node exists
-          const narParsed   = parseNarration(narration);
+          const invItemName = safeStr(inv.STOCKITEMNAME);
+          if (!invItemName) continue; // true empty entry
+
+          // Parse qty: prefer BILLEDQTY (in billing UOM) over ACTUALQTY
+          const qtyParsed = parseQtyString(inv.BILLEDQTY || inv.ACTUALQTY);
+          const invRate   = parseRateString(inv.RATE);
+          const invAmount = Math.abs(safeNum(inv.AMOUNT));
 
           inventoryEntries.push({
-            itemName:     invItemName || narParsed.itemName,
-            quantity:     invQty      || narParsed.quantity,
-            unit:         invUnit     || narParsed.unit,
-            rate:         invRate     || narParsed.rate,
-            amount:       invAmount   || totalAmount,
+            itemName:     invItemName,
+            quantity:     qtyParsed.qty,
+            unit:         qtyParsed.unit,
+            rate:         invRate,
+            amount:       invAmount || totalAmount,
             salesOfficer: narParsed.salesOfficer,
             areaCity:     narParsed.areaCity,
             state:        narParsed.state,
           });
         }
 
-        // ── Fallback: parse narration when no inventory node exists ────────
-        // Handles Wallnut-style Sales vouchers that embed item info in narration
-        if (inventoryEntries.length === 0) {
-          const narParsed = parseNarration(narration);
-          if (narParsed.itemName) {
-            inventoryEntries.push({
-              itemName:     narParsed.itemName,
-              quantity:     narParsed.quantity,
-              unit:         narParsed.unit,
-              rate:         narParsed.rate,
-              amount:       narParsed.rate > 0 && narParsed.quantity > 0
-                              ? narParsed.rate * narParsed.quantity
-                              : totalAmount,
-              salesOfficer: narParsed.salesOfficer,
-              areaCity:     narParsed.areaCity,
-              state:        narParsed.state,
-            });
-          }
+        // ── Fallback: parse narration when no real inventory nodes exist ───
+        if (inventoryEntries.length === 0 && narParsed.itemName) {
+          inventoryEntries.push({
+            itemName:     narParsed.itemName,
+            quantity:     narParsed.quantity,
+            unit:         narParsed.unit,
+            rate:         narParsed.rate,
+            amount:       narParsed.rate > 0 && narParsed.quantity > 0
+                            ? narParsed.rate * narParsed.quantity
+                            : totalAmount,
+            salesOfficer: narParsed.salesOfficer,
+            areaCity:     narParsed.areaCity,
+            state:        narParsed.state,
+          });
         }
 
         // Skip vouchers with no date or no voucher number (likely header rows)
