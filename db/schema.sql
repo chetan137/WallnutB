@@ -138,6 +138,25 @@ CREATE TABLE IF NOT EXISTS outstanding_payables (
   UNIQUE (company_id, party_name)
 );
 
+-- ─── Bills Payable ────────────────────────────────────────────────────────────
+-- Individual bill-level payable records from Tally's "Bills Payable" report.
+-- One row per bill/invoice outstanding with a vendor/supplier.
+-- Tags: BILLPARTY=party, BILLREF=invoice#, BILLDATE=invoice date,
+--       BILLCL=outstanding amount, BILLDUE=due date, BILLOVERDUE=days overdue
+-- Replaced fully on each daily master sync.
+CREATE TABLE IF NOT EXISTS bills_payable (
+  id            SERIAL PRIMARY KEY,
+  company_id    INT  NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  party_name    TEXT NOT NULL,
+  bill_ref      TEXT NOT NULL,
+  bill_date     DATE,
+  amount        NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  due_date      DATE,
+  overdue_days  INT  NOT NULL DEFAULT 0,
+  synced_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, party_name, bill_ref)
+);
+
 -- ─── Trial Balance Groups ─────────────────────────────────────────────────────
 -- Group-level Dr/Cr closing balances from Tally's Trial Balance report.
 -- This is the AUTHORITATIVE source for P&L and Balance Sheet totals.

@@ -188,7 +188,7 @@ function buildOutstandingPayablesRequest(companyName) {
   <BODY>
     <EXPORTDATA>
       <REQUESTDESC>
-        <REPORTNAME>Outstanding Payables</REPORTNAME>
+        <REPORTNAME>Bills Payable</REPORTNAME>
         <STATICVARIABLES>
           <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
           <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>

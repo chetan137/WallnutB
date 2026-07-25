@@ -409,7 +409,64 @@ function parseStockItems(parsed, companyId) {
   return records;
 }
 
-// ── parseOutstanding ──────────────────────────────────────────────────────────
+// ── parseBillsPayable ──────────────────────────────────────────────────────────
+
+/**
+ * Converts Tally date string "31-Jan-21" or "31-Jan-2021" to ISO "2021-01-31".
+ * Returns null if unparseable.
+ */
+function parseTallyDate(str) {
+  if (!str || !str.trim()) return null;
+  const MONTHS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+  const parts = str.trim().split('-');
+  if (parts.length !== 3) return null;
+  const day = parseInt(parts[0], 10);
+  const mon = MONTHS[parts[1]];
+  let year  = parseInt(parts[2], 10);
+  if (year < 100) year += 2000;
+  if (isNaN(day) || !mon || isNaN(year)) return null;
+  return `${year}-${String(mon).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+}
+
+/**
+ * Parses Tally's "Bills Payable" report XML.
+ * Each bill block:
+ *   <BILLFIXED><BILLDATE>DD-Mon-YY</BILLDATE><BILLREF>ref</BILLREF><BILLPARTY>name</BILLPARTY></BILLFIXED>
+ *   <BILLCL>amount</BILLCL>
+ *   <BILLDUE>DD-Mon-YY</BILLDUE>
+ *   <BILLOVERDUE>days</BILLOVERDUE>
+ *
+ * @param {string} raw  Raw XML string
+ * @param {number} companyId
+ * @returns {Array<{companyId,partyName,billRef,billDate,amount,dueDate,overdueDays}>}
+ */
+function parseBillsPayable(raw, companyId) {
+  const records = [];
+  try {
+    // Match each complete bill block as one unit
+    const blockRe = /<BILLFIXED>[\s\S]*?<BILLDATE>([^<]*)<\/BILLDATE>[\s\S]*?<BILLREF>([^<]*)<\/BILLREF>[\s\S]*?<BILLPARTY>([^<]*)<\/BILLPARTY>[\s\S]*?<\/BILLFIXED>\s*<BILLCL>([^<]*)<\/BILLCL>\s*<BILLDUE>([^<]*)<\/BILLDUE>\s*<BILLOVERDUE>([^<]*)<\/BILLOVERDUE>/g;
+
+    let m;
+    while ((m = blockRe.exec(raw)) !== null) {
+      const billDate    = parseTallyDate(m[1].trim());
+      const billRef     = m[2].trim().replace(/&amp;/g, '&').replace(/&apos;/g, "'");
+      const partyName   = m[3].trim().replace(/&amp;/g, '&').replace(/&apos;/g, "'");
+      const amount      = parseFloat(m[4]) || 0;
+      const dueDate     = parseTallyDate(m[5].trim());
+      const overdueDays = parseInt(m[6], 10) || 0;
+
+      if (!partyName || amount <= 0) continue; // skip zero/negative bills
+
+      records.push({ companyId, partyName, billRef, billDate, amount, dueDate, overdueDays });
+    }
+  } catch (e) {
+    logger.error(`[parsers] parseBillsPayable error: ${e.message}`);
+  }
+  return records;
+}
+
+module.exports = { parseVouchers, parseLedgers, parseStockItems, parseOutstanding, parseBillsPayable };
+
 
 /**
  * Parses Outstanding Receivables XML.
@@ -442,5 +499,3 @@ function parseOutstanding(parsed, companyId) {
   }
   return records;
 }
-
-module.exports = { parseVouchers, parseLedgers, parseStockItems, parseOutstanding };

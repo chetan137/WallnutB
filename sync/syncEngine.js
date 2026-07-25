@@ -497,6 +497,66 @@ async function syncOutstanding(company) {
   }
 }
 
+// ── Bills Payable ────────────────────────────────────────────────────────────
+// Fetches Tally's "Bills Payable" report (individual bill-level records).
+// Gives party name, bill ref, bill date, outstanding amount, due date, overdue days.
+// Source: Tally REPORTNAME="Bills Payable" (confirmed working, returns raw XML not collection).
+async function syncBillsPayable(company) {
+  const { id: companyId, tally_name: tallyName } = company;
+  const t0 = Date.now();
+  logStep('BILLS PAY', `start — company: "${company.name}"`);
+
+  try {
+    const xml = templates.buildOutstandingPayablesRequest(tallyName);
+    const raw = await tallyClient.request(xml);
+
+    // Check for empty response (company has no payables)
+    if (!raw || raw.trim() === '<ENVELOPE></ENVELOPE>') {
+      logStep('BILLS PAY', '⏭  empty response — no payables for this company');
+      return;
+    }
+
+    const records = parsers.parseBillsPayable(raw, companyId);
+    logStep('BILLS PAY', `parsed ${records.length} bills`);
+
+    if (records.length === 0) {
+      logStep('BILLS PAY', '⏭  0 payable bills found');
+      return;
+    }
+
+    await withTransaction(async (client) => {
+      // Full replace
+      await client.query('DELETE FROM bills_payable WHERE company_id=$1', [companyId]);
+      let inserted = 0;
+      for (const r of records) {
+        await client.query(`
+          INSERT INTO bills_payable
+            (company_id, party_name, bill_ref, bill_date, amount, due_date, overdue_days, synced_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+          ON CONFLICT (company_id, party_name, bill_ref)
+          DO UPDATE SET amount=EXCLUDED.amount, due_date=EXCLUDED.due_date,
+            overdue_days=EXCLUDED.overdue_days, synced_at=NOW()
+        `, [companyId, r.partyName, r.billRef, r.billDate, r.amount, r.dueDate, r.overdueDays]);
+        inserted++;
+      }
+      // Also upsert party-wise summary into outstanding_payables
+      await client.query('DELETE FROM outstanding_payables WHERE company_id=$1', [companyId]);
+      await client.query(`
+        INSERT INTO outstanding_payables (company_id, party_name, amount_payable, synced_at)
+        SELECT company_id, party_name, SUM(amount), NOW()
+        FROM bills_payable
+        WHERE company_id=$1
+        GROUP BY company_id, party_name
+        ON CONFLICT (company_id, party_name)
+        DO UPDATE SET amount_payable=EXCLUDED.amount_payable, synced_at=NOW()
+      `, [companyId]);
+      logStep('BILLS PAY ✅', `${inserted} bills | ${humanMs(Date.now()-t0)}`);
+    });
+  } catch (err) {
+    logger.error(`[syncEngine] ❌ BILLS PAY FAILED "${company.name}": ${err.message}`);
+  }
+}
+
 // ── Compute Closing Balances ───────────────────────────────────────────────────
 // CLOSINGBALANCE is not exported by Tally's List of Accounts API.
 // Formula: closing_balance = opening_balance + SUM(all ledger entries in vouchers this year)
@@ -601,10 +661,11 @@ async function runSyncCycle({ includeMasters = false } = {}) {
 
     // ── Step D: Masters (only on startup/daily OR first-ever sync) ───────────
     if (includeMasters || !company.initial_sync_done) {
-      logger.info(`[syncEngine]   [masters: ledgers → stock items → outstanding → closing balances]`);
+      logger.info(`[syncEngine]   [masters: ledgers → stock items → outstanding → bills payable → closing balances]`);
       await syncLedgers(company);
       await syncStockItems(company);
       await syncOutstanding(company);
+      await syncBillsPayable(company);
       await computeClosingBalances(company);
     } else {
       // Incremental run: recompute closing balances from fresh voucher entries
@@ -620,4 +681,4 @@ async function runSyncCycle({ includeMasters = false } = {}) {
   logger.info('[syncEngine] ════════════════════════════════════════════');
 }
 
-module.exports = { runSyncCycle, syncVouchers, syncLedgers, syncStockItems, syncOutstanding, syncTrialBalance, syncProfitAndLoss };
+module.exports = { runSyncCycle, syncVouchers, syncLedgers, syncStockItems, syncOutstanding, syncBillsPayable, syncTrialBalance, syncProfitAndLoss };
