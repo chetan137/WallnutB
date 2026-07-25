@@ -52,13 +52,18 @@ function buildAllVouchersRequest(companyName, fromDate, toDate) {
 }
 
 /**
- * Fetch ALL ledger masters (customers, suppliers, banks, all groups).
- * No ACCOUNTTYPE filter — works for unknown company structures.
+ * Fetch ALL ledger masters (customers, suppliers, banks, all groups)
+ * with their CLOSING BALANCE as of the given date range.
+ *
+ * IMPORTANT: SVFROMDATE + SVTODATE are REQUIRED for Tally to compute
+ * closing balances. Without them Tally returns 0 for all balances.
  *
  * @param {string} companyName
+ * @param {string} fromDate   ISO date "YYYY-MM-DD" (fiscal year start)
+ * @param {string} toDate     ISO date "YYYY-MM-DD" (today or fiscal year end)
  * @returns {string}
  */
-function buildLedgerMasterRequest(companyName) {
+function buildLedgerMasterRequest(companyName, fromDate, toDate) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER>
@@ -70,6 +75,8 @@ function buildLedgerMasterRequest(companyName) {
         <REPORTNAME>List of Accounts</REPORTNAME>
         <STATICVARIABLES>
           <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
+          <SVTODATE>${isoToTally(toDate)}</SVTODATE>
           <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         </STATICVARIABLES>
       </REQUESTDESC>

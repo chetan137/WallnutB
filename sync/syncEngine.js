@@ -174,16 +174,26 @@ async function syncVouchers(company) {
 // Shows real-time download + parse progress every 2 MB.
 
 async function syncLedgers(company) {
-  const { id: companyId, tally_name: tallyName } = company;
+  const { id: companyId, tally_name: tallyName, fiscal_year_from } = company;
   const t0 = Date.now();
   logStep('LEDGERS', `start — company: "${company.name}"`);
   await syncLogs.startSync(companyId, 'ledgers');
 
   try {
+    // ── Date range for closing balance computation ────────────────────────
+    // SVFROMDATE + SVTODATE are REQUIRED — without them Tally returns 0 for all balances.
+    const fromDate = fiscal_year_from
+      ? (fiscal_year_from instanceof Date
+          ? fiscal_year_from.toISOString().slice(0, 10)
+          : String(fiscal_year_from).slice(0, 10))
+      : '2024-04-01';
+    const toDate = todayIso();
+
     // ── Open streaming HTTP connection to Tally ───────────────────────────
-    logStep('LEDGERS', '📡 opening stream to Tally (large response expected)...');
-    const xml    = templates.buildLedgerMasterRequest(tallyName);
+    logStep('LEDGERS', `📡 opening stream to Tally (balance as of ${fromDate}→${toDate})...`);
+    const xml    = templates.buildLedgerMasterRequest(tallyName, fromDate, toDate);
     const stream = await tallyClient.requestStream(xml);
+
 
     // ── Stream-parse: download + SAX parse simultaneously ────────────────
     logStep('LEDGERS', '⚙️  streaming download + parsing simultaneously...');
