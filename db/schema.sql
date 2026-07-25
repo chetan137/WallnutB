@@ -154,6 +154,29 @@ CREATE TABLE IF NOT EXISTS trial_balance_groups (
   UNIQUE (company_id, group_name, period_from, period_to)
 );
 
+-- ─── P&L Line Items ───────────────────────────────────────────────────────────
+-- Line items from Tally's "Profit and Loss" report.
+-- Different from Trial Balance — P&L is available even for CLOSED fiscal years.
+-- Tag mapping from raw XML:
+--   DSPDISPNAME → group_name    (e.g. "Sales Accounts", "Employee Salary")
+--   BSMAINAMT   → main_amount   (group total: positive=income, negative=expense)
+--   PLSUBAMT    → sub_amount    (sub-item detail within a group, may be 0)
+-- Key computed metrics:
+--   Revenue      = main_amount WHERE group_name = 'Sales Accounts'
+--   Cost of Sales = main_amount WHERE group_name = 'Cost of Sales :'
+--   Gross Profit = Revenue + Cost of Sales (cost is negative)
+--   Net Profit   = SUM of all main_amount values
+CREATE TABLE IF NOT EXISTS pl_items (
+  id           SERIAL PRIMARY KEY,
+  company_id   INT   NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  group_name   TEXT  NOT NULL,
+  main_amount  NUMERIC(15, 2) NOT NULL DEFAULT 0, -- BSMAINAMT: positive=income, negative=expense
+  sub_amount   NUMERIC(15, 2) NOT NULL DEFAULT 0, -- PLSUBAMT: sub-item detail
+  period_from  DATE  NOT NULL,
+  period_to    DATE  NOT NULL,
+  synced_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, group_name, period_from, period_to)
+);
 
 -- ─── Indexes ─────────────────────────────────────────────────────────────────
 -- Optimized for the query patterns used by the AWS Express API.

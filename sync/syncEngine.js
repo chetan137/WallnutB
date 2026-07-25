@@ -134,6 +134,65 @@ function endOfFiscalYear(fromDate) {
   return `${endYear}-03-31`;
 }
 
+// ── Profit & Loss Report (─────────────────────────────────────────────────────
+// Fetches Tally's P&L report which gives actual P&L line items.
+// Critically different from Trial Balance for CLOSED fiscal years:
+//   - Trial Balance (closed year) = Balance Sheet only (P&L transferred to Retained Earnings)
+//   - P&L Report = actual Sales/Purchase/Expense breakdown for ANY period
+// XML tags used: DSPDISPNAME, BSMAINAMT (group total), PLSUBAMT (sub-item)
+async function syncProfitAndLoss(company) {
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, is_historical } = company;
+  const t0 = Date.now();
+  logStep('P&L', `start — company: "${company.name}"`);
+
+  try {
+    const fromDate = fiscal_year_from
+      ? (fiscal_year_from instanceof Date
+          ? fiscal_year_from.toISOString().slice(0, 10)
+          : String(fiscal_year_from).slice(0, 10))
+      : '2024-04-01';
+    const toDate = is_historical ? endOfFiscalYear(fromDate) : todayIso();
+
+    const xml = templates.buildProfitAndLossRequest(tallyName, fromDate, toDate);
+    const raw = await tallyClient.request(xml);
+
+    // P&L uses BSMAINAMT (group total) and PLSUBAMT (sub-item detail)
+    // — NOT the same as Trial Balance's DSPCLDRAMTA / DSPCLCRAMTA
+    const names = [...raw.matchAll(/<DSPDISPNAME>([^<]*)<\/DSPDISPNAME>/g)].map(m => m[1].trim());
+    const mains = [...raw.matchAll(/<BSMAINAMT>([^<]*)<\/BSMAINAMT>/g)].map(m => parseFloat(m[1]) || 0);
+    const subs  = [...raw.matchAll(/<PLSUBAMT>([^<]*)<\/PLSUBAMT>/g)].map(m => parseFloat(m[1]) || 0);
+
+    if (names.length === 0) {
+      logStep('P&L', '⚠️  no line items found in Tally P&L response');
+      return;
+    }
+
+    let upserted = 0;
+    await withTransaction(async (client) => {
+      for (let i = 0; i < names.length; i++) {
+        const groupName  = names[i];
+        const mainAmount = mains[i] || 0;
+        const subAmount  = subs[i]  || 0;
+
+        await client.query(`
+          INSERT INTO pl_items
+            (company_id, group_name, main_amount, sub_amount, period_from, period_to, synced_at)
+          VALUES ($1,$2,$3,$4,$5,$6,NOW())
+          ON CONFLICT (company_id, group_name, period_from, period_to)
+          DO UPDATE SET main_amount=EXCLUDED.main_amount, sub_amount=EXCLUDED.sub_amount,
+            synced_at=NOW()
+        `, [companyId, groupName, mainAmount, subAmount, fromDate, toDate]);
+        upserted++;
+      }
+    });
+
+    logStep('P&L ✅', `${upserted} items stored | ${humanMs(Date.now()-t0)}`);
+
+  } catch (err) {
+    logger.error(`[syncEngine] ❌ P&L FAILED "${company.name}": ${err.message}`);
+  }
+}
+
 // ── Vouchers ───────────────────────────────────────────────────────────────────
 
 async function syncVouchers(company) {
@@ -510,8 +569,9 @@ async function runSyncCycle({ includeMasters = false } = {}) {
 
   // 3. Process sequentially
   for (const company of companies) {
-    // Trial Balance is tiny (1KB) — always refresh regardless of historical status
+    // Trial Balance + P&L are tiny (~1-6KB) — always refresh regardless of historical status
     await syncTrialBalance(company);
+    await syncProfitAndLoss(company);
 
     if (company.is_historical && company.initial_sync_done) {
       logger.info(`[syncEngine] ⏭  Skipping "${company.name}" (historical, fully synced already)`);
@@ -546,4 +606,4 @@ async function runSyncCycle({ includeMasters = false } = {}) {
   logger.info('[syncEngine] ════════════════════════════════════════════');
 }
 
-module.exports = { runSyncCycle, syncVouchers, syncLedgers, syncStockItems, syncOutstanding, syncTrialBalance };
+module.exports = { runSyncCycle, syncVouchers, syncLedgers, syncStockItems, syncOutstanding, syncTrialBalance, syncProfitAndLoss };
