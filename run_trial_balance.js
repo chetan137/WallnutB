@@ -2,11 +2,10 @@
 /**
  * run_trial_balance.js
  * Run ONLY the trial balance sync for all companies.
- * Use when you need to refresh Trial Balance data without a full sync.
  * Run: node run_trial_balance.js
  */
 require('dotenv').config();
-const { pool }           = require('./db/pool');
+const pool               = require('./db/pool');
 const { syncTrialBalance } = require('./sync/syncEngine');
 
 async function main() {
