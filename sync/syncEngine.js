@@ -67,6 +67,81 @@ function logStep(label, msg) {
   logger.info(`[syncEngine]   ▶ ${label} | ${msg}`);
 }
 
+// ── Trial Balance (Group Totals) ─────────────────────────────────────────────────────
+// Fetches group-level P&L and Balance Sheet amounts from Tally.
+// This is the AUTHORITATIVE source for Sales, Purchase, Assets, Liabilities totals.
+// Response is ~1KB — no streaming needed.
+async function syncTrialBalance(company) {
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, is_historical } = company;
+  const t0 = Date.now();
+  logStep('TRIAL BAL', `start — company: "${company.name}"`);
+
+  try {
+    // Date range: full fiscal year for historical, YTD for current
+    const fromDate = fiscal_year_from
+      ? (fiscal_year_from instanceof Date
+          ? fiscal_year_from.toISOString().slice(0, 10)
+          : String(fiscal_year_from).slice(0, 10))
+      : '2024-04-01';
+    const toDate = is_historical ? endOfFiscalYear(fromDate) : todayIso();
+
+    const xml = templates.buildTrialBalanceRequest(tallyName, fromDate, toDate);
+    const raw = await tallyClient.request(xml);
+
+    // Parse DSP format: <DSPDISPNAME>name</DSPDISPNAME> + <DSPCLDRAMTA>dr</DSPCLDRAMTA> + <DSPCLCRAMTA>cr</DSPCLCRAMTA>
+    const names = [...raw.matchAll(/<DSPDISPNAME>([^<]*)<\/DSPDISPNAME>/g)].map(m => m[1].trim());
+    const drs   = [...raw.matchAll(/<DSPCLDRAMTA>([^<]*)<\/DSPCLDRAMTA>/g)].map(m => parseFloat(m[1]) || 0);
+    const crs   = [...raw.matchAll(/<DSPCLCRAMTA>([^<]*)<\/DSPCLCRAMTA>/g)].map(m => parseFloat(m[1]) || 0);
+
+    if (names.length === 0) {
+      logStep('TRIAL BAL', '⚠️  no groups found in Tally response');
+      return;
+    }
+
+    let upserted = 0;
+    await withTransaction(async (client) => {
+      for (let i = 0; i < names.length; i++) {
+        const groupName  = names[i];
+        const drAmount   = Math.abs(drs[i] || 0);   // make positive
+        const crAmount   = Math.abs(crs[i] || 0);   // make positive
+        // net: positive = CR balance (income/liability), negative = DR balance (expense/asset)
+        const netBalance = (crs[i] || 0) + (drs[i] || 0);  // drs are negative in raw XML
+
+        await client.query(`
+          INSERT INTO trial_balance_groups
+            (company_id, group_name, dr_amount, cr_amount, net_balance, period_from, period_to, synced_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+          ON CONFLICT (company_id, group_name, period_from, period_to)
+          DO UPDATE SET dr_amount=EXCLUDED.dr_amount, cr_amount=EXCLUDED.cr_amount,
+            net_balance=EXCLUDED.net_balance, synced_at=NOW()
+        `, [companyId, groupName, drAmount, crAmount, netBalance, fromDate, toDate]);
+        upserted++;
+      }
+    });
+
+    logStep('TRIAL BAL ✅', `${upserted} groups stored | ${humanMs(Date.now()-t0)}`);
+
+  } catch (err) {
+    logger.error(`[syncEngine] ❌ TRIAL BAL FAILED "${company.name}": ${err.message}`);
+  }
+}
+
+/** Returns the last day of the fiscal year that started in fromDate (Indian FY: ends Mar 31) */
+function endOfFiscalYear(fromDate) {
+  const d = new Date(fromDate);
+  // If fiscal year starts April, it ends next March 31
+  const endYear = d.getMonth() >= 3 ? d.getFullYear() + 1 : d.getFullYear();
+  return `${endYear}-03-31`;
+}
+
+// ── Main Sync Cycle ────────────────────────────────────────────────────────────
+
+async function runSyncCycle({ includeMasters = false } = {}) {
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, initial_sync_done } = company;
+  const t0 = Date.now();
+  logStep('VOUCHERS', `start — company: "${company.name}"`);
+  await syncLogs.startSync(companyId, 'vouchers');
+
 // ── Vouchers ───────────────────────────────────────────────────────────────────
 
 async function syncVouchers(company) {
@@ -455,6 +530,7 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     logger.info(`[syncEngine] ────────────────────────────────────────────`);
 
     await syncVouchers(company);
+    await syncTrialBalance(company);  // always refresh — tiny 1KB request
 
     if (includeMasters || !company.initial_sync_done) {
       logger.info(`[syncEngine]   [masters: ledgers → stock items → outstanding → closing balances]`);
@@ -463,7 +539,6 @@ async function runSyncCycle({ includeMasters = false } = {}) {
       await syncOutstanding(company);
       await computeClosingBalances(company);
     } else {
-      // Incremental: only vouchers synced — recompute closing balances from fresh entries
       await computeClosingBalances(company);
       logger.info(`[syncEngine]   [masters skipped — incremental voucher-only cycle]`);
     }

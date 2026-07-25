@@ -144,9 +144,66 @@ function buildOutstandingRequest(companyName) {
 </ENVELOPE>`;
 }
 
+/**
+ * Fetch Trial Balance (group-level) for a date range.
+ * Returns ~37 top-level account groups with Dr/Cr closing amounts.
+ * Response is tiny (~1KB) — use request() not requestStream().
+ *
+ * @param {string} companyName
+ * @param {string} fromDate  ISO "YYYY-MM-DD"
+ * @param {string} toDate    ISO "YYYY-MM-DD"
+ * @returns {string}
+ */
+function buildTrialBalanceRequest(companyName, fromDate, toDate) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Trial Balance</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
+          <SVTODATE>${isoToTally(toDate)}</SVTODATE>
+          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+}
+
+/**
+ * Fetch Outstanding Payables snapshot.
+ * Gives all suppliers/vendors with pending payable amounts.
+ *
+ * @param {string} companyName
+ * @returns {string}
+ */
+function buildOutstandingPayablesRequest(companyName) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Outstanding Payables</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+}
+
 module.exports = {
   buildAllVouchersRequest,
   buildLedgerMasterRequest,
   buildStockItemsRequest,
   buildOutstandingRequest,
+  buildTrialBalanceRequest,
+  buildOutstandingPayablesRequest,
 };

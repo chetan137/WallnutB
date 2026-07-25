@@ -125,6 +125,36 @@ CREATE TABLE IF NOT EXISTS outstanding (
   UNIQUE (company_id, party_name)
 );
 
+-- ─── Trial Balance Groups ─────────────────────────────────────────────────────
+-- Group-level Dr/Cr closing balances from Tally's Trial Balance report.
+-- This is the AUTHORITATIVE source for P&L and Balance Sheet totals.
+-- Updated on every master sync (replaces old data for the period).
+--
+-- Key groups and what they power on the dashboard:
+--   Sales Accounts       → Trading Details / Revenue
+--   Purchase Accounts    → Trading Details / COGS
+--   Direct Expenses      → Gross Profit calculation
+--   Indirect Incomes     → Net Profit calculation
+--   Indirect Exp         → Net Profit calculation
+--   Current Assets       → Balance Sheet
+--   Current Liabilities  → Balance Sheet
+--   Fixed Assets         → Balance Sheet
+--   Loans (Liability)    → Balance Sheet / Debt-Equity ratio
+--   Capital Account      → Balance Sheet / Equity
+CREATE TABLE IF NOT EXISTS trial_balance_groups (
+  id           SERIAL PRIMARY KEY,
+  company_id   INT   NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  group_name   TEXT  NOT NULL,
+  dr_amount    NUMERIC(15, 2) NOT NULL DEFAULT 0,  -- absolute DR closing (negative in raw XML)
+  cr_amount    NUMERIC(15, 2) NOT NULL DEFAULT 0,  -- absolute CR closing (positive in raw XML)
+  net_balance  NUMERIC(15, 2) NOT NULL DEFAULT 0,  -- positive=CR balance, negative=DR balance
+  period_from  DATE  NOT NULL,
+  period_to    DATE  NOT NULL,
+  synced_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, group_name, period_from, period_to)
+);
+
+
 -- ─── Indexes ─────────────────────────────────────────────────────────────────
 -- Optimized for the query patterns used by the AWS Express API.
 
