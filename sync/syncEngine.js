@@ -134,14 +134,6 @@ function endOfFiscalYear(fromDate) {
   return `${endYear}-03-31`;
 }
 
-// ── Main Sync Cycle ────────────────────────────────────────────────────────────
-
-async function runSyncCycle({ includeMasters = false } = {}) {
-  const { id: companyId, tally_name: tallyName, fiscal_year_from, initial_sync_done } = company;
-  const t0 = Date.now();
-  logStep('VOUCHERS', `start — company: "${company.name}"`);
-  await syncLogs.startSync(companyId, 'vouchers');
-
 // ── Vouchers ───────────────────────────────────────────────────────────────────
 
 async function syncVouchers(company) {
