@@ -20,7 +20,7 @@ const logger = require('../utils/logger');
 // ── Field lists we care about (everything else is skipped) ────────────────────
 
 const LEDGER_FIELDS = new Set([
-  'PARENT', 'CLOSINGBALANCE', 'GSTREGISTRATIONNUMBER', 'GSTIN',
+  'PARENT', 'OPENINGBALANCE', 'GSTREGISTRATIONNUMBER', 'GSTIN', 'PARTYGSTIN',
   'STATENAME', 'STATE', 'NAME',
 ]);
 
@@ -166,12 +166,14 @@ async function streamParseLedgers(responseStream, companyId, onProgress) {
     (raw) => {
       const name           = String(raw._name || raw.NAME || '').trim();
       const parentGroup    = String(raw.PARENT || '').trim();
-      const closingBalance = parseFloat(raw.CLOSINGBALANCE) || 0;
-      const gstNo          = String(raw.GSTREGISTRATIONNUMBER || raw.GSTIN || '').trim();
+      // CLOSINGBALANCE is NOT in List of Accounts — only OPENINGBALANCE is.
+      // closing_balance is computed post-sync as: opening_balance + SUM(voucher_ledger_entries)
+      const openingBalance = parseFloat(raw.OPENINGBALANCE) || 0;
+      const gstNo          = String(raw.PARTYGSTIN || raw.GSTREGISTRATIONNUMBER || raw.GSTIN || '').trim();
       const state          = String(raw.STATENAME || raw.STATE || '').trim();
 
       if (!name) return; // skip empty
-      records.push({ companyId, name, parentGroup, closingBalance, gstNo, state });
+      records.push({ companyId, name, parentGroup, openingBalance, gstNo, state });
     },
     onProgress
   );

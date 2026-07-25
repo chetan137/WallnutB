@@ -228,12 +228,13 @@ async function syncLedgers(company) {
     await withTransaction(async (client) => {
       for (const r of records) {
         await client.query(
-          `INSERT INTO ledgers (company_id,name,parent_group,closing_balance,gst_no,state,synced_at)
-           VALUES ($1,$2,$3,$4,$5,$6,NOW())
+          `INSERT INTO ledgers (company_id,name,parent_group,opening_balance,closing_balance,gst_no,state,synced_at)
+           VALUES ($1,$2,$3,$4,$4,$5,$6,NOW())
            ON CONFLICT (company_id,name)
-           DO UPDATE SET parent_group=EXCLUDED.parent_group, closing_balance=EXCLUDED.closing_balance,
+           DO UPDATE SET parent_group=EXCLUDED.parent_group,
+             opening_balance=EXCLUDED.opening_balance,
              gst_no=EXCLUDED.gst_no, state=EXCLUDED.state, synced_at=NOW()`,
-          [r.companyId, r.name, r.parentGroup, r.closingBalance, r.gstNo, r.state]
+          [r.companyId, r.name, r.parentGroup, r.openingBalance, r.gstNo, r.state]
         );
         upserted++;
         if (upserted % 100 === 0 || upserted === records.length) {
@@ -363,7 +364,55 @@ async function syncOutstanding(company) {
   }
 }
 
-// ── Main Sync Cycle ────────────────────────────────────────────────────────────
+// ── Compute Closing Balances ───────────────────────────────────────────────────
+// CLOSINGBALANCE is not exported by Tally's List of Accounts API.
+// Formula: closing_balance = opening_balance + SUM(all ledger entries in vouchers this year)
+// This runs once after both ledger masters AND vouchers are synced.
+async function computeClosingBalances(company) {
+  const { id: companyId } = company;
+  const t0 = Date.now();
+  logStep('CLOSING BAL', `Computing for company: "${company.name}"`);
+
+  try {
+    const client = await pool.connect();
+    try {
+      // Single-pass UPDATE: join ledgers → aggregated voucher_ledger_entries
+      const result = await client.query(`
+        UPDATE ledgers l
+        SET closing_balance = l.opening_balance + COALESCE(vs.net_amount, 0)
+        FROM (
+          SELECT
+            v.company_id,
+            LOWER(TRIM(vle.ledger_name)) AS ledger_key,
+            SUM(vle.amount)              AS net_amount
+          FROM voucher_ledger_entries vle
+          JOIN vouchers v ON v.id = vle.voucher_id
+          WHERE v.company_id = $1
+          GROUP BY v.company_id, LOWER(TRIM(vle.ledger_name))
+        ) vs
+        WHERE l.company_id = vs.company_id
+          AND LOWER(TRIM(l.name)) = vs.ledger_key
+        RETURNING l.id
+      `, [companyId]);
+
+      // Ledgers with NO transactions keep closing_balance = opening_balance
+      await client.query(`
+        UPDATE ledgers
+        SET closing_balance = opening_balance
+        WHERE company_id = $1
+          AND closing_balance = 0
+          AND opening_balance <> 0
+      `, [companyId]);
+
+      logStep('CLOSING BAL ✅', `Updated ${result.rowCount} ledgers in ${humanMs(Date.now()-t0)}`);
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    logger.error(`[syncEngine] ❌ CLOSING BAL FAILED "${company.name}": ${err.message}`);
+  }
+}
+
 
 async function runSyncCycle({ includeMasters = false } = {}) {
   const cycleStart = Date.now();
@@ -408,11 +457,14 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     await syncVouchers(company);
 
     if (includeMasters || !company.initial_sync_done) {
-      logger.info(`[syncEngine]   [masters: ledgers → stock items → outstanding]`);
+      logger.info(`[syncEngine]   [masters: ledgers → stock items → outstanding → closing balances]`);
       await syncLedgers(company);
       await syncStockItems(company);
       await syncOutstanding(company);
+      await computeClosingBalances(company);
     } else {
+      // Incremental: only vouchers synced — recompute closing balances from fresh entries
+      await computeClosingBalances(company);
       logger.info(`[syncEngine]   [masters skipped — incremental voucher-only cycle]`);
     }
 

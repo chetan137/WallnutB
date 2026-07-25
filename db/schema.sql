@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS ledgers (
   parent_group     TEXT,                -- Tally ledger group (used to classify account type)
   gst_no           TEXT,
   state            TEXT,
-  closing_balance  NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  opening_balance  NUMERIC(15, 2) NOT NULL DEFAULT 0,  -- balance at FY start (from Tally master)
+  closing_balance  NUMERIC(15, 2) NOT NULL DEFAULT 0,  -- computed: opening + SUM(ledger entries)
   synced_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (company_id, name)
 );
