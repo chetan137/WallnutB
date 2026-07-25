@@ -125,6 +125,19 @@ CREATE TABLE IF NOT EXISTS outstanding (
   UNIQUE (company_id, party_name)
 );
 
+-- ─── Outstanding Payables ─────────────────────────────────────────────────────
+-- Snapshot of party-wise amounts WE OWE (vendors/suppliers) as of last sync.
+-- Negative CLOSINGBALANCE in Tally = payable (we owe them).
+-- Replaced fully on each daily master sync.
+CREATE TABLE IF NOT EXISTS outstanding_payables (
+  id              SERIAL PRIMARY KEY,
+  company_id      INT  NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  party_name      TEXT NOT NULL,
+  amount_payable  NUMERIC(15, 2) NOT NULL DEFAULT 0,  -- stored as positive
+  synced_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, party_name)
+);
+
 -- ─── Trial Balance Groups ─────────────────────────────────────────────────────
 -- Group-level Dr/Cr closing balances from Tally's Trial Balance report.
 -- This is the AUTHORITATIVE source for P&L and Balance Sheet totals.
