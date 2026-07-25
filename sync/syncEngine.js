@@ -510,6 +510,9 @@ async function runSyncCycle({ includeMasters = false } = {}) {
 
   // 3. Process sequentially
   for (const company of companies) {
+    // Trial Balance is tiny (1KB) — always refresh regardless of historical status
+    await syncTrialBalance(company);
+
     if (company.is_historical && company.initial_sync_done) {
       logger.info(`[syncEngine] ⏭  Skipping "${company.name}" (historical, fully synced already)`);
       continue;
@@ -543,4 +546,4 @@ async function runSyncCycle({ includeMasters = false } = {}) {
   logger.info('[syncEngine] ════════════════════════════════════════════');
 }
 
-module.exports = { runSyncCycle, syncVouchers, syncLedgers, syncStockItems, syncOutstanding };
+module.exports = { runSyncCycle, syncVouchers, syncLedgers, syncStockItems, syncOutstanding, syncTrialBalance };
