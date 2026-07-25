@@ -134,12 +134,12 @@ function endOfFiscalYear(fromDate) {
   return `${endYear}-03-31`;
 }
 
-// ── Profit & Loss Report (─────────────────────────────────────────────────────
+// ── Profit & Loss Report ─────────────────────────────────────────────────────
 // Fetches Tally's P&L report which gives actual P&L line items.
 // Critically different from Trial Balance for CLOSED fiscal years:
-//   - Trial Balance (closed year) = Balance Sheet only (P&L transferred to Retained Earnings)
+//   - Trial Balance (closed year) = Balance Sheet only
 //   - P&L Report = actual Sales/Purchase/Expense breakdown for ANY period
-// XML tags used: DSPDISPNAME, BSMAINAMT (group total), PLSUBAMT (sub-item)
+// XML tags: DSPDISPNAME (name), BSMAINAMT (group total), PLSUBAMT (sub-item)
 async function syncProfitAndLoss(company) {
   const { id: companyId, tally_name: tallyName, fiscal_year_from, is_historical } = company;
   const t0 = Date.now();
@@ -156,24 +156,32 @@ async function syncProfitAndLoss(company) {
     const xml = templates.buildProfitAndLossRequest(tallyName, fromDate, toDate);
     const raw = await tallyClient.request(xml);
 
-    // P&L uses BSMAINAMT (group total) and PLSUBAMT (sub-item detail)
-    // — NOT the same as Trial Balance's DSPCLDRAMTA / DSPCLCRAMTA
-    const names = [...raw.matchAll(/<DSPDISPNAME>([^<]*)<\/DSPDISPNAME>/g)].map(m => m[1].trim());
-    const mains = [...raw.matchAll(/<BSMAINAMT>([^<]*)<\/BSMAINAMT>/g)].map(m => parseFloat(m[1]) || 0);
-    const subs  = [...raw.matchAll(/<PLSUBAMT>([^<]*)<\/PLSUBAMT>/g)].map(m => parseFloat(m[1]) || 0);
+    // Parse by walking paired blocks:
+    // Each entry is: <DSPACCNAME><DSPDISPNAME>name</DSPDISPNAME></DSPACCNAME>
+    //                <PLAMT><PLSUBAMT>sub</PLSUBAMT><BSMAINAMT>main</BSMAINAMT></PLAMT>
+    // We extract each block and pull name + amounts together to avoid index drift.
+    const blockRegex = /<DSPDISPNAME>([^<]*)<\/DSPDISPNAME>[\s\S]*?<PLSUBAMT>([^<]*)<\/PLSUBAMT>[\s\S]*?<BSMAINAMT>([^<]*)<\/BSMAINAMT>/g;
+    const records = [];
+    let match;
+    while ((match = blockRegex.exec(raw)) !== null) {
+      const groupName  = match[1].trim();
+      const subAmount  = parseFloat(match[2]) || 0;
+      const mainAmount = parseFloat(match[3]) || 0;
+      if (groupName) records.push({ groupName, mainAmount, subAmount });
+    }
 
-    if (names.length === 0) {
+    if (records.length === 0) {
       logStep('P&L', '⚠️  no line items found in Tally P&L response');
       return;
     }
 
-    let upserted = 0;
+    // Delete old data for this period, then insert fresh (ensures clean full-sync)
     await withTransaction(async (client) => {
-      for (let i = 0; i < names.length; i++) {
-        const groupName  = names[i];
-        const mainAmount = mains[i] || 0;
-        const subAmount  = subs[i]  || 0;
-
+      await client.query(
+        'DELETE FROM pl_items WHERE company_id=$1 AND period_from=$2 AND period_to=$3',
+        [companyId, fromDate, toDate]
+      );
+      for (const r of records) {
         await client.query(`
           INSERT INTO pl_items
             (company_id, group_name, main_amount, sub_amount, period_from, period_to, synced_at)
@@ -181,12 +189,11 @@ async function syncProfitAndLoss(company) {
           ON CONFLICT (company_id, group_name, period_from, period_to)
           DO UPDATE SET main_amount=EXCLUDED.main_amount, sub_amount=EXCLUDED.sub_amount,
             synced_at=NOW()
-        `, [companyId, groupName, mainAmount, subAmount, fromDate, toDate]);
-        upserted++;
+        `, [companyId, r.groupName, r.mainAmount, r.subAmount, fromDate, toDate]);
       }
     });
 
-    logStep('P&L ✅', `${upserted} items stored | ${humanMs(Date.now()-t0)}`);
+    logStep('P&L ✅', `${records.length} items stored | ${humanMs(Date.now()-t0)}`);
 
   } catch (err) {
     logger.error(`[syncEngine] ❌ P&L FAILED "${company.name}": ${err.message}`);
@@ -567,26 +574,32 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     return;
   }
 
-  // 3. Process sequentially
+  // 3. Process each company
   for (const company of companies) {
-    // Trial Balance + P&L are tiny (~1-6KB) — always refresh regardless of historical status
-    await syncTrialBalance(company);
-    await syncProfitAndLoss(company);
-
-    if (company.is_historical && company.initial_sync_done) {
-      logger.info(`[syncEngine] ⏭  Skipping "${company.name}" (historical, fully synced already)`);
-      continue;
-    }
-
-    const compStart = Date.now();
     logger.info(`[syncEngine] ────────────────────────────────────────────`);
     logger.info(`[syncEngine]  ▶▶ COMPANY: "${company.name}"  (id=${company.id})`);
     logger.info(`[syncEngine]     historical=${company.is_historical} | initial_done=${company.initial_sync_done}`);
     logger.info(`[syncEngine] ────────────────────────────────────────────`);
 
-    await syncVouchers(company);
-    await syncTrialBalance(company);  // always refresh — tiny 1KB request
+    // ── Step A: Trial Balance + P&L ─────────────────────────────────────────
+    // Always run for ALL companies — these are tiny (~1-6KB) reports.
+    // Gives accurate P&L and Balance Sheet totals directly from Tally,
+    // even for CLOSED historical fiscal years.
+    await syncTrialBalance(company);
+    await syncProfitAndLoss(company);
 
+    // ── Step B: Historical companies — skip vouchers/masters after initial sync ──
+    if (company.is_historical && company.initial_sync_done) {
+      logger.info(`[syncEngine]   ⏭  Historical + fully synced — only TB & P&L refreshed`);
+      continue;
+    }
+
+    const compStart = Date.now();
+
+    // ── Step C: Vouchers ─────────────────────────────────────────────────────
+    await syncVouchers(company);
+
+    // ── Step D: Masters (only on startup/daily OR first-ever sync) ───────────
     if (includeMasters || !company.initial_sync_done) {
       logger.info(`[syncEngine]   [masters: ledgers → stock items → outstanding → closing balances]`);
       await syncLedgers(company);
@@ -594,8 +607,9 @@ async function runSyncCycle({ includeMasters = false } = {}) {
       await syncOutstanding(company);
       await computeClosingBalances(company);
     } else {
+      // Incremental run: recompute closing balances from fresh voucher entries
       await computeClosingBalances(company);
-      logger.info(`[syncEngine]   [masters skipped — incremental voucher-only cycle]`);
+      logger.info(`[syncEngine]   [masters skipped — incremental voucher sync]`);
     }
 
     logger.info(`[syncEngine]  ✅ COMPANY "${company.name}" done in ${humanMs(Date.now()-compStart)}`);
