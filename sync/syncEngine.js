@@ -575,8 +575,8 @@ async function syncBillsReceivable(company) {
       return;
     }
 
-    // parseBillsPayable works perfectly — same XML structure
-    const records = parsers.parseBillsPayable(raw, companyId);
+    // parseBillsReceivable handles negative BILLCL (receivable amounts are negative in Tally)
+    const records = parsers.parseBillsReceivable(raw, companyId);
     logStep('BILLS RCV', `parsed ${records.length} receivable bills`);
 
     if (records.length === 0) {

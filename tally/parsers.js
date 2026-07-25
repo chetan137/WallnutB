@@ -465,7 +465,47 @@ function parseBillsPayable(raw, companyId) {
   return records;
 }
 
-module.exports = { parseVouchers, parseLedgers, parseStockItems, parseOutstanding, parseBillsPayable };
+// ── parseBillsReceivable ───────────────────────────────────────────────────────
+
+/**
+ * Parses Tally's "Bills Receivable" report XML.
+ * IDENTICAL tag structure to Bills Payable (BILLFIXED, BILLCL, BILLDUE, BILLOVERDUE).
+ *
+ * KEY DIFFERENCE from payables:
+ *   In Tally's double-entry system, money owed TO you (receivable) is stored as
+ *   a CREDIT balance on the debtor ledger → BILLCL comes as a NEGATIVE number.
+ *   We store Math.abs(BILLCL) so the dashboard always works with positive amounts.
+ *
+ * @param {string} raw  Raw XML string
+ * @param {number} companyId
+ * @returns {Array<{companyId,partyName,billRef,billDate,amount,dueDate,overdueDays}>}
+ */
+function parseBillsReceivable(raw, companyId) {
+  const records = [];
+  try {
+    const blockRe = /<BILLFIXED>[\s\S]*?<BILLDATE>([^<]*)<\/BILLDATE>[\s\S]*?<BILLREF>([^<]*)<\/BILLREF>[\s\S]*?<BILLPARTY>([^<]*)<\/BILLPARTY>[\s\S]*?<\/BILLFIXED>\s*<BILLCL>([^<]*)<\/BILLCL>\s*<BILLDUE>([^<]*)<\/BILLDUE>\s*<BILLOVERDUE>([^<]*)<\/BILLOVERDUE>/g;
+
+    let m;
+    while ((m = blockRe.exec(raw)) !== null) {
+      const billDate    = parseTallyDate(m[1].trim());
+      const billRef     = m[2].trim().replace(/&amp;/g, '&').replace(/&apos;/g, "'");
+      const partyName   = m[3].trim().replace(/&amp;/g, '&').replace(/&apos;/g, "'");
+      // Receivable BILLCL is negative in Tally → take absolute value
+      const amount      = Math.abs(parseFloat(m[4]) || 0);
+      const dueDate     = parseTallyDate(m[5].trim());
+      const overdueDays = parseInt(m[6], 10) || 0;
+
+      if (!partyName || amount === 0) continue; // skip zero bills only
+
+      records.push({ companyId, partyName, billRef, billDate, amount, dueDate, overdueDays });
+    }
+  } catch (e) {
+    logger.error(`[parsers] parseBillsReceivable error: ${e.message}`);
+  }
+  return records;
+}
+
+module.exports = { parseVouchers, parseLedgers, parseStockItems, parseOutstanding, parseBillsPayable, parseBillsReceivable };
 
 
 /**
