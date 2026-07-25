@@ -748,16 +748,18 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     logger.info(`[syncEngine]     historical=${company.is_historical} | initial_done=${company.initial_sync_done}`);
     logger.info(`[syncEngine] ────────────────────────────────────────────`);
 
-    // ── Step A: Trial Balance + P&L ─────────────────────────────────────────
-    // Always run for ALL companies — these are tiny (~1-6KB) reports.
-    // Gives accurate P&L and Balance Sheet totals directly from Tally,
-    // even for CLOSED historical fiscal years.
-    await syncTrialBalance(company);
-    await syncProfitAndLoss(company);
+    // ── Step A: Always run for ALL companies (fast report-based, no big data) ──
+    // These are small (~1-70KB) point-in-time reports from Tally.
+    // Must run even for historical companies to keep snapshot fresh.
+    await syncTrialBalance(company);        // Balance Sheet group totals
+    await syncProfitAndLoss(company);       // P&L line items (Sales/Purchase/Expenses)
+    await syncBillsPayable(company);        // Vendor bills + overdue (snapshot, no dates needed)
+    await syncBillsReceivable(company);     // Customer bills + overdue (snapshot, no dates needed)
+    await syncReceiptsAndPayments(company); // Cash Inflow/Outflow for the fiscal year
 
-    // ── Step B: Historical companies — skip vouchers/masters after initial sync ──
+    // ── Step B: Historical companies — skip heavy voucher/master sync ──────────
     if (company.is_historical && company.initial_sync_done) {
-      logger.info(`[syncEngine]   ⏭  Historical + fully synced — only TB & P&L refreshed`);
+      logger.info(`[syncEngine]   ⏭  Historical + fully synced — skipping vouchers & masters`);
       continue;
     }
 
@@ -766,18 +768,14 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     // ── Step C: Vouchers ─────────────────────────────────────────────────────
     await syncVouchers(company);
 
-    // ── Step D: Masters (only on startup/daily OR first-ever sync) ───────────
+    // ── Step D: Masters (startup/daily OR first-ever sync) ───────────────────
     if (includeMasters || !company.initial_sync_done) {
-      logger.info(`[syncEngine]   [masters: ledgers → stock → outstanding → bills payable → bills receivable → cash flow → closing balances]`);
+      logger.info(`[syncEngine]   [masters: ledgers → stock → outstanding → closing balances]`);
       await syncLedgers(company);
       await syncStockItems(company);
-      await syncOutstanding(company);
-      await syncBillsPayable(company);
-      await syncBillsReceivable(company);
-      await syncReceiptsAndPayments(company);
+      await syncOutstanding(company);       // Receivables collection (requires XML parsing)
       await computeClosingBalances(company);
     } else {
-      // Incremental run: recompute closing balances from fresh voucher entries
       await computeClosingBalances(company);
       logger.info(`[syncEngine]   [masters skipped — incremental voucher sync]`);
     }
