@@ -316,7 +316,7 @@ async function syncVouchers(company) {
 // Shows real-time download + parse progress every 2 MB.
 
 async function syncLedgers(company) {
-  const { id: companyId, tally_name: tallyName, fiscal_year_from } = company;
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, is_historical } = company;
   const t0 = Date.now();
   logStep('LEDGERS', `start — company: "${company.name}"`);
   await syncLogs.startSync(companyId, 'ledgers');
@@ -324,8 +324,10 @@ async function syncLedgers(company) {
   try {
     // ── Date range for closing balance computation ────────────────────────
     // SVFROMDATE + SVTODATE are REQUIRED — without them Tally returns 0 for all balances.
+    // For historical companies: use fiscal year end (Mar 31) so CLOSINGBALANCE = year-end balance.
+    // For current companies: use today so CLOSINGBALANCE = current balance.
     const fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
-    const toDate = todayIso();
+    const toDate   = is_historical ? endOfFiscalYear(fromDate) : todayIso();
 
     // ── Open streaming HTTP connection to Tally ───────────────────────────
     logStep('LEDGERS', `📡 opening stream to Tally (balance as of ${fromDate}→${toDate})...`);
