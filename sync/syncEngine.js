@@ -78,11 +78,7 @@ async function syncTrialBalance(company) {
 
   try {
     // Date range: full fiscal year for historical, YTD for current
-    const fromDate = fiscal_year_from
-      ? (fiscal_year_from instanceof Date
-          ? fiscal_year_from.toISOString().slice(0, 10)
-          : String(fiscal_year_from).slice(0, 10))
-      : '2024-04-01';
+    const fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
     const toDate = is_historical ? endOfFiscalYear(fromDate) : todayIso();
 
     const xml = templates.buildTrialBalanceRequest(tallyName, fromDate, toDate);
@@ -134,6 +130,29 @@ function endOfFiscalYear(fromDate) {
   return `${endYear}-03-31`;
 }
 
+/**
+ * Safely convert a DB date value to 'YYYY-MM-DD' string.
+ * CRITICAL: Do NOT use .toISOString().slice(0,10) for DATE values from PostgreSQL.
+ * In India (UTC+5:30), the pg driver creates Date as local midnight
+ * (2024-04-01 00:00 IST = 2024-03-31 18:30 UTC), so toISOString() gives wrong date.
+ * Use LOCAL date components instead.
+ *
+ * @param {Date|string|null} d
+ * @returns {string|null}
+ */
+function dbDateToIso(d) {
+  if (!d) return null;
+  if (d instanceof Date) {
+    // Use LOCAL date components — avoids UTC offset shift in IST (UTC+5:30)
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+  // Already a string (pg can return DATE as string in some versions)
+  return String(d).slice(0, 10);
+}
+
 // ── Profit & Loss Report ─────────────────────────────────────────────────────
 // Fetches Tally's P&L report which gives actual P&L line items.
 // Critically different from Trial Balance for CLOSED fiscal years:
@@ -146,11 +165,7 @@ async function syncProfitAndLoss(company) {
   logStep('P&L', `start — company: "${company.name}"`);
 
   try {
-    const fromDate = fiscal_year_from
-      ? (fiscal_year_from instanceof Date
-          ? fiscal_year_from.toISOString().slice(0, 10)
-          : String(fiscal_year_from).slice(0, 10))
-      : '2024-04-01';
+    const fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
     const toDate = is_historical ? endOfFiscalYear(fromDate) : todayIso();
 
     const xml = templates.buildProfitAndLossRequest(tallyName, fromDate, toDate);
@@ -211,11 +226,7 @@ async function syncVouchers(company) {
     let fromDate;
 
     if (!initial_sync_done) {
-      fromDate = fiscal_year_from
-        ? (fiscal_year_from instanceof Date
-            ? fiscal_year_from.toISOString().slice(0, 10)
-            : String(fiscal_year_from).slice(0, 10))
-        : '2024-04-01';
+      fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
       logStep('VOUCHERS', `FULL SYNC | range: ${fromDate} → ${toDate}`);
     } else {
       const lastSynced = await syncLogs.getLastSyncedDate(companyId, 'vouchers');
@@ -313,11 +324,7 @@ async function syncLedgers(company) {
   try {
     // ── Date range for closing balance computation ────────────────────────
     // SVFROMDATE + SVTODATE are REQUIRED — without them Tally returns 0 for all balances.
-    const fromDate = fiscal_year_from
-      ? (fiscal_year_from instanceof Date
-          ? fiscal_year_from.toISOString().slice(0, 10)
-          : String(fiscal_year_from).slice(0, 10))
-      : '2024-04-01';
+    const fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
     const toDate = todayIso();
 
     // ── Open streaming HTTP connection to Tally ───────────────────────────
@@ -612,11 +619,7 @@ async function syncReceiptsAndPayments(company) {
   logStep('CASH FLOW', `start — company: "${company.name}"`);
 
   try {
-    const fromDate = fiscal_year_from
-      ? (fiscal_year_from instanceof Date
-          ? fiscal_year_from.toISOString().slice(0, 10)
-          : String(fiscal_year_from).slice(0, 10))
-      : '2024-04-01';
+    const fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
     const toDate = is_historical ? endOfFiscalYear(fromDate) : todayIso();
 
     const xml = templates.buildReceiptsAndPaymentsRequest(tallyName, fromDate, toDate);
