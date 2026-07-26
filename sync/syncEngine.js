@@ -177,18 +177,16 @@ async function syncProfitAndLoss(company) {
 
     // Delete old data for this period, then insert fresh (ensures clean full-sync)
     await withTransaction(async (client) => {
-      await client.query(
-        'DELETE FROM pl_items WHERE company_id=$1 AND period_from=$2 AND period_to=$3',
-        [companyId, fromDate, toDate]
-      );
+      // Full delete for this company's P&L — ensures no stale zero rows
+      await client.query('DELETE FROM pl_items WHERE company_id=$1', [companyId]);
       for (const r of records) {
+        if (!r.groupName) continue;
         await client.query(`
           INSERT INTO pl_items
             (company_id, group_name, main_amount, sub_amount, period_from, period_to, synced_at)
           VALUES ($1,$2,$3,$4,$5,$6,NOW())
           ON CONFLICT (company_id, group_name, period_from, period_to)
-          DO UPDATE SET main_amount=EXCLUDED.main_amount, sub_amount=EXCLUDED.sub_amount,
-            synced_at=NOW()
+          DO NOTHING
         `, [companyId, r.groupName, r.mainAmount, r.subAmount, fromDate, toDate]);
       }
     });
