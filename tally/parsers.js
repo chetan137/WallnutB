@@ -246,7 +246,16 @@ function parseVouchers(parsed, companyId) {
         }
 
         // ── Fallback: parse narration when no real inventory nodes exist ───
-        if (inventoryEntries.length === 0 && narParsed.itemName) {
+        // Only for voucher types that can genuinely carry inventory. Tally's
+        // four purely-financial voucher types (Journal, Payment, Receipt,
+        // Contra) never have real stock items — falling back to narration
+        // there mistakes free-text accounting narration for a product name.
+        // Verified live: this produced item_name values like "Being raised
+        // exhibition done at gharkul 2024..." from Journal-type vouchers,
+        // polluting every item-level view (Top Products, ABC analysis,
+        // slow-moving stock).
+        const canCarryInventory = !/^(journal|payment|receipt|contra)\b/i.test(vchType);
+        if (inventoryEntries.length === 0 && narParsed.itemName && canCarryInventory) {
           inventoryEntries.push({
             itemName:     narParsed.itemName,
             quantity:     narParsed.quantity,
