@@ -2,6 +2,7 @@
 
 const pool   = require('../db/pool');
 const logger = require('../utils/logger');
+const { dbDateToIso } = require('../utils/helpers');
 
 /**
  * sync/syncLogs.js
@@ -31,8 +32,12 @@ async function getLastSyncedDate(companyId, dataType) {
   );
   const val = res.rows[0]?.last_synced_date;
   if (!val) return null;
-  // pg returns Date objects — convert to ISO string
-  return val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
+  // BUG FIX: was val.toISOString().slice(0,10) — for a DATE column, pg
+  // creates a Date at LOCAL midnight, and toISOString() converts to UTC,
+  // shifting the date back a day in any positive-UTC-offset timezone (e.g.
+  // IST, this VM's timezone). dbDateToIso() uses local date components
+  // instead, matching the same fix already applied in syncEngine.js.
+  return dbDateToIso(val);
 }
 
 /**

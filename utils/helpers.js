@@ -38,6 +38,28 @@ function tallyToIso(tallyDate) {
 }
 
 /**
+ * Safely convert a DB date value (Date object or string) to 'YYYY-MM-DD'.
+ * CRITICAL: Do NOT use .toISOString().slice(0,10) for DATE values from
+ * PostgreSQL. In India (UTC+5:30), the pg driver creates the Date at local
+ * midnight (2024-04-01 00:00 IST = 2024-03-31 18:30 UTC), so toISOString()
+ * shifts the date back by one day. Use LOCAL date components instead.
+ *
+ * @param {Date|string|null} d
+ * @returns {string|null}
+ */
+function dbDateToIso(d) {
+  if (!d) return null;
+  if (d instanceof Date) {
+    const y   = d.getFullYear();
+    const m   = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+  // Already a string (pg can return DATE as string in some versions)
+  return String(d).slice(0, 10);
+}
+
+/**
  * Safely reads any Tally XML value (string, object with _, or array).
  * Always returns a trimmed string. Never throws.
  */
@@ -85,4 +107,4 @@ function todayIso() {
   return `${y}-${m}-${d}`;
 }
 
-module.exports = { escapeXml, isoToTally, tallyToIso, safeStr, safeNum, ensureArray, subtractDays, todayIso };
+module.exports = { escapeXml, isoToTally, tallyToIso, dbDateToIso, safeStr, safeNum, ensureArray, subtractDays, todayIso };

@@ -7,7 +7,7 @@ const parsers     = require('../tally/parsers');
 const syncLogs    = require('./syncLogs');
 const logger      = require('../utils/logger');
 const config      = require('../config');
-const { subtractDays, todayIso } = require('../utils/helpers');
+const { subtractDays, todayIso, dbDateToIso } = require('../utils/helpers');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -130,28 +130,9 @@ function endOfFiscalYear(fromDate) {
   return `${endYear}-03-31`;
 }
 
-/**
- * Safely convert a DB date value to 'YYYY-MM-DD' string.
- * CRITICAL: Do NOT use .toISOString().slice(0,10) for DATE values from PostgreSQL.
- * In India (UTC+5:30), the pg driver creates Date as local midnight
- * (2024-04-01 00:00 IST = 2024-03-31 18:30 UTC), so toISOString() gives wrong date.
- * Use LOCAL date components instead.
- *
- * @param {Date|string|null} d
- * @returns {string|null}
- */
-function dbDateToIso(d) {
-  if (!d) return null;
-  if (d instanceof Date) {
-    // Use LOCAL date components — avoids UTC offset shift in IST (UTC+5:30)
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  }
-  // Already a string (pg can return DATE as string in some versions)
-  return String(d).slice(0, 10);
-}
+// dbDateToIso() now lives in utils/helpers.js — syncLogs.js needed the same
+// safe conversion and had drifted to an unsafe .toISOString() version, so
+// this is shared from one place now (see utils/helpers.js for the rationale).
 
 // ── Profit & Loss Report ─────────────────────────────────────────────────────
 // Fetches Tally's P&L report which gives actual P&L line items.
@@ -216,13 +197,20 @@ async function syncProfitAndLoss(company) {
 // ── Vouchers ───────────────────────────────────────────────────────────────────
 
 async function syncVouchers(company) {
-  const { id: companyId, tally_name: tallyName, fiscal_year_from, initial_sync_done } = company;
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, initial_sync_done, is_historical } = company;
   const t0 = Date.now();
   logStep('VOUCHERS', `start — company: "${company.name}"`);
   await syncLogs.startSync(companyId, 'vouchers');
 
   try {
-    const toDate = todayIso();
+    // BUG FIX: this used to always be todayIso(), even for historical
+    // companies — every other sync* function here (trial balance, P&L,
+    // receipts & payments) correctly bounds a historical company's period
+    // to its fiscal year end. Requesting Day Book data for a closed company
+    // out to today's date is out of its own books' range; verified live
+    // that it produced a full historical company's vouchers all collapsed
+    // onto a single date instead of their real spread across the year.
+    const toDate = is_historical ? endOfFiscalYear(dbDateToIso(fiscal_year_from) || '2024-04-01') : todayIso();
     let fromDate;
 
     if (!initial_sync_done) {
@@ -252,8 +240,18 @@ async function syncVouchers(company) {
 
     if (records.length === 0) {
       await syncLogs.successSync(companyId, 'vouchers', toDate, { fetched: 0, upserted: 0 });
-      if (!initial_sync_done) await syncLogs.markInitialSyncDone(companyId);
-      logStep('VOUCHERS', '⏭  0 records — Tally has no data for this range');
+      // BUG FIX: this used to call markInitialSyncDone() here too, on the
+      // very first sync attempt returning zero records. That permanently
+      // flips the company to incremental-only mode (which only ever looks
+      // back a few days) even if the zero result was transient — Tally not
+      // fully warmed up, a company just added, a momentary hiccup — and the
+      // real historical range then never gets fetched again. Verified live:
+      // this is exactly why one active company's vouchers only start from
+      // several months after its actual fiscal year began. Only mark the
+      // initial sync done once we've actually captured real records —
+      // if it's genuinely empty, the full-range request just retries next
+      // cycle, which is harmless.
+      logStep('VOUCHERS', '⏭  0 records — Tally has no data for this range (will retry full range next cycle if initial sync)');
       return;
     }
 
