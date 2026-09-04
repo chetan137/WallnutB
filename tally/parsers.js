@@ -122,11 +122,23 @@ function parseRateString(raw) {
 // ── Narration parser ────────────────────────────────────────────────────────────
 
 /**
- * Parses the structured narration format used by this Wallnut Tally setup:
+ * Parses the structured narration format used by the ORIGINAL Wallnut demo
+ * import data:
  *   "Item: <name> | Qty: <n> <unit> | Rate: <r> | Area: <a> | SO: <s> | State: <st>"
  *
- * For companies with a different / no narration format, all fields return '' or 0
- * and itemName falls back to the full narration text (truncated to 200 chars).
+ * BUG FIX: this used to fall back to storing the FULL RAW NARRATION as
+ * itemName when the "Item:" pattern didn't match. That fallback was meant
+ * for companies with "a different narration format" but in practice, real
+ * accountant-written narrations are free text describing the transaction
+ * ("Being Material send to...", "Being Exp Booked on Transport...",
+ * "(being TDS on contractor accounted for)") — never a product name.
+ * Verified live: this corrupted voucher_inventory_entries.item_name for
+ * every voucher with no real ALLINVENTORYENTRIES.LIST (Journal, Payment,
+ * pure-expense Purchase vouchers, etc.), which then polluted every
+ * item-level view downstream (Top Products, ABC analysis, slow-moving
+ * stock all showed narration text as if it were a product). Only ever
+ * return an itemName when the structured format actually matched — no
+ * narration falls back to "no item known", not "guess from free text".
  *
  * @param {string} narration
  * @returns {{ itemName, quantity, unit, rate, salesOfficer, areaCity, state }}
@@ -152,10 +164,8 @@ function parseNarration(narration) {
     result.salesOfficer = get('SO');
     result.areaCity     = get('Area');
     result.state        = get('State');
-  } else {
-    // Unknown narration format — store as item name (best effort)
-    result.itemName = narration.slice(0, 200);
   }
+  // else: unstructured narration — leave itemName '' (no fabricated item).
 
   return result;
 }
