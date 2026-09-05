@@ -38,6 +38,7 @@
 require('dotenv').config();
 const fs          = require('fs');
 const tallyClient = require('./tally/client');
+const templates   = require('./tally/xmlTemplates');
 const config      = require('./config');
 const { isoToTally, subtractDays, todayIso, dbDateToIso, escapeXml } = require('./utils/helpers');
 
@@ -509,6 +510,44 @@ async function main() {
     console.log('\nVERDICT: if AMOUNT and STOCKITEMNAME/LEDGERNAME are populated with real values, this');
     console.log('         fetch shape can fully replace "Day Book". test7_response.xml is saved for');
     console.log('         further PowerShell Select-String inspection without re-fetching from Tally.');
+  });
+
+  // ── TEST 8 — the ACTUAL production request (buildAllVouchersRequest),
+  // now using trimmed "list.field" FETCH instead of the whole native
+  // ALLLEDGERENTRIES.LIST/ALLINVENTORYENTRIES.LIST objects. TEST 7's
+  // request (whole objects) produced a 105 MB response that crashed
+  // Tally's XML gateway outright after being hit with it repeatedly —
+  // every request afterward, for BOTH companies, started failing
+  // instantly. This test checks the trimmed version is dramatically
+  // smaller BEFORE trusting the automated pm2 cron cycle with it again.
+  await safely('TEST 8', async () => {
+    const co = active || historical;
+    section(`TEST 8 — Production buildAllVouchersRequest() with trimmed FETCH (company: "${co.name}")`);
+
+    const t0 = Date.now();
+    const xml = templates.buildAllVouchersRequest(co.tallyName);
+    const raw = await tallyClient.request(xml);
+    console.log(`  → ${raw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}`);
+    console.log(`  <AMOUNT> tags: ${countTag(raw, 'AMOUNT')} | <STOCKITEMNAME> tags: ${countTag(raw, 'STOCKITEMNAME')} | <LEDGERNAME> tags: ${countTag(raw, 'LEDGERNAME')}`);
+
+    const voucherBlocks = [...raw.matchAll(/<VOUCHER[ >][\s\S]*?<\/VOUCHER>/g)].map((m) => m[0]);
+    const realBlocks = voucherBlocks.filter((b) => b.length > 30);
+    console.log(`  <VOUCHER> blocks: ${voucherBlocks.length} | non-placeholder blocks: ${realBlocks.length}`);
+
+    const withInventory = realBlocks.find((b) => b.includes('STOCKITEMNAME'));
+    if (withInventory) {
+      const idx = withInventory.indexOf('ALLINVENTORYENTRIES');
+      console.log('\n  First voucher WITH inventory — around ALLINVENTORYENTRIES (1200 chars):');
+      console.log('  ' + withInventory.slice(Math.max(0, idx - 50), idx + 1200).replace(/\n/g, '\n  '));
+    } else if (realBlocks.length > 0) {
+      console.log('\n  First real voucher block (1200 chars):');
+      console.log('  ' + realBlocks[0].slice(0, 1200).replace(/\n/g, '\n  '));
+    }
+
+    console.log('\nVERDICT: response should be MUCH smaller than TEST 7\'s 105MB (aim: a few MB), while');
+    console.log('         still showing real LEDGERNAME/AMOUNT/STOCKITEMNAME values. If it\'s still huge');
+    console.log('         or Tally hangs/times out, STOP here and report back before running pm2 again —');
+    console.log('         do not let the cron cycle retry this automatically.');
   });
 
   section('DONE — copy this whole output back to Claude for analysis.');

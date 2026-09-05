@@ -47,6 +47,17 @@ const { escapeXml, isoToTally } = require('../utils/helpers');
  * voucher history; the caller's upsert (ON CONFLICT) keeps repeated full
  * pulls correct and idempotent.
  *
+ * BUG FIX 2: FETCHing the compound fields ALLLEDGERENTRIES.LIST and
+ * ALLINVENTORYENTRIES.LIST by their bare list name pulls Tally's ENTIRE
+ * native schema for every entry — dozens of empty GST/VAT/TDS/Excise/
+ * e-invoice fields per ledger and inventory line that nothing here reads.
+ * Verified live: this made one company's response balloon to 105 MB, and
+ * repeatedly hitting Tally with a request that size eventually crashed its
+ * XML gateway outright (every request afterward, for BOTH companies,
+ * started failing instantly with ECONNRESET). Fixed by using TDL's
+ * "list.field" dotted FETCH syntax to request only the specific sub-fields
+ * this parser actually reads, instead of the whole native object.
+ *
  * @param {string} companyName  Exact Tally company name
  * @returns {string}
  */
@@ -70,8 +81,8 @@ function buildAllVouchersRequest(companyName) {
           <COLLECTION NAME="VoucherCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
             <TYPE>Voucher</TYPE>
             <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION</FETCH>
-            <FETCH>ALLLEDGERENTRIES.LIST</FETCH>
-            <FETCH>ALLINVENTORYENTRIES.LIST</FETCH>
+            <FETCH>ALLLEDGERENTRIES.LEDGERNAME, ALLLEDGERENTRIES.AMOUNT, ALLLEDGERENTRIES.ISPARTYLEDGER, ALLLEDGERENTRIES.ISDEEMEDPOSITIVE</FETCH>
+            <FETCH>ALLINVENTORYENTRIES.STOCKITEMNAME, ALLINVENTORYENTRIES.ACTUALQTY, ALLINVENTORYENTRIES.BILLEDQTY, ALLINVENTORYENTRIES.RATE, ALLINVENTORYENTRIES.AMOUNT</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
