@@ -312,12 +312,30 @@ async function syncVouchers(company) {
       }
     }
 
+    // BUG FIX: a full backfill (!initial_sync_done) where every single
+    // chunk comes back with 0 records isn't a legitimate "empty company" —
+    // verified live that this happens when Tally's focused/current company
+    // (in its own UI) doesn't match the one this request's SVCURRENTCOMPANY
+    // asks for: every chunk returns 0 records without throwing (so
+    // anyChunkFailed stays false), and the old bug here quietly marked the
+    // backfill "done" anyway — permanently skipping a historical company
+    // from ever being retried, with its real data never fetched. Only mark
+    // done on a full backfill that actually found at least one real record.
+    const suspiciousEmptyBackfill = !initial_sync_done && totalFetched === 0 && chunks.length > 0;
+    if (suspiciousEmptyBackfill) {
+      logger.warn(
+        `[syncEngine] ⚠️  VOUCHERS full backfill for "${company.name}" got 0 records across all ` +
+        `${chunks.length} chunks — likely means Tally's focused company doesn't match this one right ` +
+        `now. NOT marking initial_sync_done, so this retries next cycle instead of being skipped forever.`
+      );
+    }
     await syncLogs.successSync(companyId, 'vouchers', todayIso(), { fetched: totalFetched, upserted: totalUpserted });
-    if (!initial_sync_done && !anyChunkFailed) await syncLogs.markInitialSyncDone(companyId);
+    if (!initial_sync_done && !anyChunkFailed && !suspiciousEmptyBackfill) await syncLogs.markInitialSyncDone(companyId);
     logStep(
       anyChunkFailed ? 'VOUCHERS ⚠️' : 'VOUCHERS ✅',
       `${totalUpserted}/${totalFetched} in DB across ${chunks.length} chunk(s)` +
         (anyChunkFailed ? ' — some chunks failed, will retry next cycle' : '') +
+        (suspiciousEmptyBackfill ? ' — 0 records, will retry next cycle' : '') +
         ` | total: ${humanMs(Date.now() - t0)}`
     );
 
