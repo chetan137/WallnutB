@@ -144,11 +144,25 @@ function buildLedgerMasterRequest(companyName, fromDate, toDate) {
 }
 
 /**
- * Fetch Stock Groups & Items from Stock Summary report.
+ * Fetch individual stock items (real product names, each item's own stock
+ * group, closing qty/value) via an ad-hoc TDL Collection.
  *
- * NOTE: TallyPrime's XML API does not support inline TDL for custom collection exports.
- * "Stock Summary" is the only accessible report. It returns DSP display format
- * (DSPACCNAME/DSPDISPNAME + DSPSTKINFO) which parsers.js handles correctly.
+ * BUG FIX: the old REPORTNAME="Stock Summary" request (comment used to
+ * claim ad-hoc TDL collections weren't possible at all — disproven this
+ * session by the vouchers fix) only returns Tally's DSP GROUP-level
+ * rollup display (~8 rows like "Finished Goods", "Raw Material" with no
+ * parent of their own), not real individual items. Verified live in the
+ * DB: stock_items ended up with those 8 group names AS IF they were items,
+ * every one with an empty parent_group. Every real sales line's item name
+ * (e.g. "Lapox Tilegrip - Supreme (20 Kg)") then failed to match any row
+ * in stock_items, so every "Stock Category"/"Stock Group" value read out
+ * as blank — the whole breakdown was empty regardless of real sales data.
+ *
+ * Fixed with the same ad-hoc Collection technique proven for vouchers:
+ * Export + TYPE=Collection + ID, TYPE=StockItem, fetching each item's own
+ * Name/Parent/ClosingBalance/ClosingValue/BaseUnits — parsers.js already
+ * expects exactly this shape (its STOCKITEM branch), it just never used
+ * to receive it in production.
  *
  * @param {string} companyName
  * @returns {string}
@@ -157,18 +171,26 @@ function buildStockItemsRequest(companyName) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER>
-    <TALLYREQUEST>Export Data</TALLYREQUEST>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>StockItemCollection</ID>
   </HEADER>
   <BODY>
-    <EXPORTDATA>
-      <REQUESTDESC>
-        <REPORTNAME>Stock Summary</REPORTNAME>
-        <STATICVARIABLES>
-          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
-          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        </STATICVARIABLES>
-      </REQUESTDESC>
-    </EXPORTDATA>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="StockItemCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>StockItem</TYPE>
+            <FETCH>Name, Parent, ClosingBalance, ClosingValue, BaseUnits</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
   </BODY>
 </ENVELOPE>`;
 }

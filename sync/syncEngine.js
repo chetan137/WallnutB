@@ -441,6 +441,12 @@ async function syncStockItems(company) {
     let upserted = 0;
 
     await withTransaction(async (client) => {
+      // Full replace: the OLD REPORTNAME="Stock Summary" request stored
+      // Tally's group-level rollups (e.g. "Finished Goods") as if they were
+      // items, with no real product names. Those stale rows share no name
+      // with any real item, so the upsert below would never touch them —
+      // delete first so this table only ever holds what Tally just returned.
+      await client.query('DELETE FROM stock_items WHERE company_id=$1', [companyId]);
       for (const r of records) {
         await client.query(
           `INSERT INTO stock_items (company_id,name,parent_group,base_unit,closing_qty,closing_value,synced_at)
