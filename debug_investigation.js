@@ -550,6 +550,68 @@ async function main() {
     console.log('         do not let the cron cycle retry this automatically.');
   });
 
+  // ── TEST 9 — scalar-only fetch for the HISTORICAL company specifically ──
+  // TEST 6/7/8 only ever exercised the ACTIVE company (active || historical
+  // picks active when both exist). We've never actually confirmed the
+  // historical company's real voucher COUNT — every attempt that included
+  // ledger/inventory entries crashed Tally outright (Memory Access
+  // Violation). Scalar-only fields did NOT crash Tally for the active
+  // company even at ~3868 vouchers, so this is the safe way to find out
+  // how large the historical company's voucher set actually is before
+  // trying ledger/inventory entries for it again.
+  if (historical) {
+    await safely('TEST 9', async () => {
+      section(`TEST 9 — Scalar-only voucher count for HISTORICAL company "${historical.name}" (safe — no compound fields)`);
+
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>VoucherCollection3</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(historical.tallyName)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="VoucherCollection3" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+
+      const t0 = Date.now();
+      const raw = await tallyClient.request(xml);
+      console.log(`  → ${raw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}`);
+
+      const voucherBlocks = [...raw.matchAll(/<VOUCHER[ >][\s\S]*?<\/VOUCHER>/g)].map((m) => m[0]);
+      const realBlocks = voucherBlocks.filter((b) => b.length > 30);
+      console.log(`  <VOUCHER> blocks: ${voucherBlocks.length} | non-placeholder blocks: ${realBlocks.length}`);
+
+      if (realBlocks.length > 0) {
+        const dates = realBlocks.map((b) => (b.match(/<DATE[^>]*>([^<]*)<\/DATE>/) || [])[1] || '');
+        const dateCounts = {};
+        for (const d of dates) dateCounts[d] = (dateCounts[d] || 0) + 1;
+        console.log(`  distinct dates: ${Object.keys(dateCounts).length}`);
+      }
+
+      console.log('\nVERDICT: this tells us how many real vouchers this company actually has — the count');
+      console.log('         we need to know before deciding whether ledger/inventory entries need to be');
+      console.log('         fetched in smaller batches for this company.');
+    });
+  } else {
+    console.log('\n(No historical company configured — skipping TEST 9)');
+  }
+
   section('DONE — copy this whole output back to Claude for analysis.');
 }
 
