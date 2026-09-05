@@ -342,6 +342,80 @@ async function main() {
     console.log('         company returns a fixed/growing payload for ANY export request, unrelated to REPORTNAME.');
   });
 
+  // ── TEST 6 — Vouchers via ad-hoc TDL Collection (bypasses "Day Book") ────
+  // TEST 5 proved report names resolve normally and "Day Book" specifically
+  // is being redirected (likely a TDL add-on hooking that exact report name
+  // for its own purpose — e.g. a GST e-invoice/e-way-bill tool). Same fix
+  // pattern as TEST 3's working StockItem collection: ask for a Voucher
+  // COLLECTION via Export+TYPE=Collection instead of Export Data+REPORTNAME,
+  // which sidesteps "Day Book" entirely. Voucher collections are period-
+  // sensitive by default in Tally (unlike Ledger/StockItem collections),
+  // so SVFROMDATE/SVTODATE should scope this without an explicit FILTER.
+  await safely('TEST 6', async () => {
+    const co = active || historical;
+    section(`TEST 6 — Vouchers via ad-hoc TDL Collection, bypassing "Day Book" (company: "${co.name}")`);
+
+    const today = todayIso();
+    const fromDate = co.fiscalYearFrom;
+    console.log(`\nRequest: ${fromDate} → ${today} (full fiscal-year-to-date range)`);
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>VoucherCollection</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(co.tallyName)}</SVCURRENTCOMPANY>
+        <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
+        <SVTODATE>${isoToTally(today)}</SVTODATE>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="VoucherCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION, LEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+
+    const t0 = Date.now();
+    const raw = await tallyClient.request(xml);
+    console.log(`  → ${raw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}`);
+
+    if (countTag(raw, 'VOUCHER') < 50) {
+      console.log('  Unique tags in response:');
+      console.log('  ' + uniqueTags(raw).join(', '));
+      console.log('  First 2000 chars:');
+      console.log('  ' + raw.slice(0, 2000).replace(/\n/g, '\n  '));
+    } else {
+      // Real data — show date distribution like TEST 2 did, to confirm
+      // per-voucher dates actually spread across the requested range
+      // instead of collapsing onto one date.
+      const voucherBlocks = [...raw.matchAll(/<VOUCHER[ >][\s\S]*?<\/VOUCHER>/g)].map((m) => m[0]);
+      const dates = voucherBlocks.map((b) => (b.match(/<DATE>([^<]*)<\/DATE>/) || [])[1] || '');
+      const dateCounts = {};
+      for (const d of dates) dateCounts[d] = (dateCounts[d] || 0) + 1;
+      console.log(`\n  <VOUCHER> blocks: ${voucherBlocks.length} | distinct dates: ${Object.keys(dateCounts).length}`);
+      console.log('  Date distribution (top 15):');
+      Object.entries(dateCounts).sort((a, b) => b[1] - a[1]).slice(0, 15).forEach(([d, n]) => console.log(`    ${d}: ${n} vouchers`));
+      console.log('\n  First voucher block (first 1500 chars):');
+      console.log('  ' + voucherBlocks[0].slice(0, 1500).replace(/\n/g, '\n  '));
+    }
+
+    console.log('\nVERDICT: real VOUCHER count with dates spread across many days (not collapsed onto');
+    console.log('         one date, not the fake "All Masters" payload) = this collection approach can');
+    console.log('         replace REPORTNAME="Day Book" in buildAllVouchersRequest().');
+  });
+
   section('DONE — copy this whole output back to Claude for analysis.');
 }
 
