@@ -67,6 +67,10 @@ function countTag(raw, tag) {
   return (raw.match(re) || []).length;
 }
 
+function uniqueTags(raw) {
+  return [...new Set([...raw.matchAll(/<([A-Z][A-Z0-9_.]*)[>\s/]/g)].map((m) => m[1]))].sort();
+}
+
 function section(title) {
   console.log('\n' + '═'.repeat(78));
   console.log(title);
@@ -102,9 +106,15 @@ async function main() {
       const t0 = Date.now();
       const wideRaw = await tallyClient.request(buildDayBookXml(active.tallyName, isoToTally(wideFrom), isoToTally(today)));
       console.log(`  → ${wideRaw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(wideRaw, 'VOUCHER')} | <TALLYMESSAGE> tags: ${countTag(wideRaw, 'TALLYMESSAGE')}`);
-      if (countTag(wideRaw, 'VOUCHER') === 0) {
-        console.log('  First 1500 chars of WIDE response:');
-        console.log('  ' + wideRaw.slice(0, 1500).replace(/\n/g, '\n  '));
+      // A real Day Book response should have hundreds of <VOUCHER> tags for
+      // this date range (DB already shows 941 real vouchers) — a low count
+      // like 1-10 is as suspicious as 0, so dump full diagnostics whenever
+      // it's implausibly low, not only when it's exactly zero.
+      if (countTag(wideRaw, 'VOUCHER') < 50) {
+        console.log('  Unique tags in WIDE response:');
+        console.log('  ' + uniqueTags(wideRaw).join(', '));
+        console.log('  First 2000 chars of WIDE response:');
+        console.log('  ' + wideRaw.slice(0, 2000).replace(/\n/g, '\n  '));
       }
 
       // Small pause so this request is fully done before the next one — no overlap possible.
@@ -115,10 +125,13 @@ async function main() {
       const t1 = Date.now();
       const narrowRaw = await tallyClient.request(buildDayBookXml(active.tallyName, isoToTally(narrowFrom), isoToTally(today)));
       console.log(`  → ${narrowRaw.length} bytes in ${Date.now() - t1}ms | <VOUCHER> tags: ${countTag(narrowRaw, 'VOUCHER')} | <TALLYMESSAGE> tags: ${countTag(narrowRaw, 'TALLYMESSAGE')}`);
-      if (countTag(narrowRaw, 'VOUCHER') === 0) {
-        console.log('  First 1500 chars of NARROW response:');
-        console.log('  ' + narrowRaw.slice(0, 1500).replace(/\n/g, '\n  '));
+      if (countTag(narrowRaw, 'VOUCHER') < 50) {
+        console.log('  Unique tags in NARROW response:');
+        console.log('  ' + uniqueTags(narrowRaw).join(', '));
+        console.log('  First 2000 chars of NARROW response:');
+        console.log('  ' + narrowRaw.slice(0, 2000).replace(/\n/g, '\n  '));
       }
+      console.log(`\n  WIDE and NARROW byte-identical: ${wideRaw.length === narrowRaw.length && wideRaw === narrowRaw}`);
 
       console.log('\nVERDICT: if both now show real <VOUCHER> counts (hundreds), last run\'s empty/wrong');
       console.log('         responses were caused by tallybackend\'s own process running concurrently.');
@@ -138,6 +151,10 @@ async function main() {
       console.log(`\nRequest: ${fromDate} → ${toDate} (fiscal year bounds)`);
       const raw = await tallyClient.request(buildDayBookXml(historical.tallyName, isoToTally(fromDate), isoToTally(toDate)));
       console.log(`  → ${raw.length} bytes | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}`);
+      if (countTag(raw, 'VOUCHER') === 0) {
+        console.log('  Full raw response (small — printing all of it):');
+        console.log('  ' + raw.replace(/\n/g, '\n  '));
+      }
 
       const dates = [...raw.matchAll(/<DATE>([^<]*)<\/DATE>/g)].map((m) => m[1]);
       const distinct = [...new Set(dates)];
