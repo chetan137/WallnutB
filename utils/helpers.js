@@ -127,31 +127,45 @@ function isoToTallyLiteral(iso) {
 }
 
 /**
- * Splits [fromIso, toIso] into consecutive calendar-month ranges (each
- * clipped to the overall bounds). Used to chunk a large voucher fetch into
- * requests small enough that Tally doesn't run out of memory serializing
- * the whole company's history in one go (verified live: a single company
- * with 10,689 vouchers crashed Tally's own process — "Memory Access
- * Violation" — when ledger/inventory entries were fetched for all of them
- * at once).
+ * Splits [fromIso, toIso] into consecutive date ranges of at most
+ * `maxDaysPerChunk` days each (clipped to the overall bounds). Used to
+ * chunk a large voucher fetch into requests small enough that the sync
+ * process doesn't run out of memory parsing the response.
  *
- * @param {string} fromIso  "YYYY-MM-DD"
- * @param {string} toIso    "YYYY-MM-DD"
+ * BUG FIX HISTORY: a single company here has 10,689 vouchers.
+ *  - Fetching them ALL in one request (with ledger/inventory entries)
+ *    crashed Tally's own process outright — a genuine "Software Exception
+ *    c0000005 (Memory Access Violation)" dialog.
+ *  - Chunking by calendar MONTH (~27.5 MB raw per chunk for this company's
+ *    busiest month) avoided that Tally-side crash, but then blew past
+ *    tallybackend's own pm2 max_memory_restart (200 MB): parsing a 27.5 MB
+ *    XML string into a full JS object tree used well over 200 MB, so pm2
+ *    killed and restarted the whole process every time, always mid-way
+ *    through the very first chunk, before anything could reach Postgres.
+ *    The VM has 8 GB RAM (not the 4 GB originally assumed when 200 MB was
+ *    set), so pm2.config.js raised max_memory_restart to 512 MB and the
+ *    default chunk size here dropped from a month to a week — comfortably
+ *    inside that ceiling even with the parser's memory overhead.
+ *
+ * @param {string} fromIso           "YYYY-MM-DD"
+ * @param {string} toIso             "YYYY-MM-DD"
+ * @param {number} [maxDaysPerChunk=7]
  * @returns {Array<{from: string, to: string}>}
  */
-function buildMonthlyRanges(fromIso, toIso) {
+function buildDateChunks(fromIso, toIso, maxDaysPerChunk = 7) {
   const ranges = [];
   let cursor = new Date(`${fromIso}T00:00:00`);
   const end  = new Date(`${toIso}T00:00:00`);
   if (isNaN(cursor) || isNaN(end) || cursor > end) return ranges;
 
+  const toIsoStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
   while (cursor <= end) {
     const rangeFrom = new Date(cursor);
-    // Last day of this range's month, or the overall `end`, whichever is earlier.
-    const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
-    const rangeTo  = monthEnd < end ? monthEnd : end;
+    const candidate = new Date(cursor);
+    candidate.setDate(candidate.getDate() + maxDaysPerChunk - 1);
+    const rangeTo = candidate < end ? candidate : end;
 
-    const toIsoStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     ranges.push({ from: toIsoStr(rangeFrom), to: toIsoStr(rangeTo) });
 
     cursor = new Date(rangeTo);
@@ -162,5 +176,5 @@ function buildMonthlyRanges(fromIso, toIso) {
 
 module.exports = {
   escapeXml, isoToTally, tallyToIso, dbDateToIso, safeStr, safeNum, ensureArray,
-  subtractDays, todayIso, isoToTallyLiteral, buildMonthlyRanges,
+  subtractDays, todayIso, isoToTallyLiteral, buildDateChunks,
 };

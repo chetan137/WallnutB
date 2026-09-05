@@ -6,7 +6,8 @@ const templates   = require('../tally/xmlTemplates');
 const parsers     = require('../tally/parsers');
 const syncLogs    = require('./syncLogs');
 const logger      = require('../utils/logger');
-const { todayIso, dbDateToIso, buildMonthlyRanges } = require('../utils/helpers');
+const config      = require('../config');
+const { todayIso, dbDateToIso, subtractDays, buildDateChunks } = require('../utils/helpers');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -249,17 +250,34 @@ async function syncVouchers(company) {
     //
     // BUG FIX 2: one company here has 10,689 vouchers. Fetching them ALL in
     // one request (with ledger/inventory entries) crashed Tally's own
-    // process outright (Memory Access Violation), not just the network
-    // connection. Verified live that a literal-date FILTER formula
-    // genuinely narrows a Voucher collection (SVFROMDATE/SVTODATE alone do
-    // not). So every run now chunks the company's full date range into
-    // month-sized requests — small enough that no single one has crashed
-    // Tally in testing, and each chunk upserts independently so a failure
-    // partway through still keeps everything fetched so far.
-    const toDate   = is_historical ? endOfFiscalYear(dbDateToIso(fiscal_year_from) || '2024-04-01') : todayIso();
-    const fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
-    const chunks   = buildMonthlyRanges(fromDate, toDate);
-    logStep('VOUCHERS', `chunked ${fromDate} → ${toDate} into ${chunks.length} month(s)`);
+    // process outright (Memory Access Violation). Verified live that a
+    // literal-date FILTER formula genuinely narrows a Voucher collection
+    // (SVFROMDATE/SVTODATE alone do not), so every run chunks the range
+    // into week-sized requests (see buildDateChunks in utils/helpers.js —
+    // also the story of why max_memory_restart in pm2.config.js changed).
+    // Each chunk upserts independently so a failure partway through still
+    // keeps everything fetched so far.
+    //
+    // BUG FIX 3: this used to always fetch the company's ENTIRE history on
+    // every run (no incremental range), because at the time Voucher
+    // collections appeared not to support date filtering at all. Now that
+    // filtering is proven to work, restored the original incremental
+    // design: only the full-history backfill (first run, or any run that
+    // hasn't completed one yet) pays the cost of walking the whole range in
+    // chunks; once initial_sync_done, later runs only fetch a small window
+    // from the last synced date (minus a backfill buffer for safety)
+    // forward, so a 10-minute cron cycle isn't re-walking a whole company's
+    // history every time.
+    const toDate = is_historical ? endOfFiscalYear(dbDateToIso(fiscal_year_from) || '2024-04-01') : todayIso();
+    let fromDate;
+    if (!initial_sync_done) {
+      fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
+    } else {
+      const lastSynced = await syncLogs.getLastSyncedDate(companyId, 'vouchers');
+      fromDate = subtractDays(lastSynced || toDate, config.sync.backfillDays);
+    }
+    const chunks = buildDateChunks(fromDate, toDate);
+    logStep('VOUCHERS', `${initial_sync_done ? 'INCREMENTAL' : 'FULL BACKFILL'} | chunked ${fromDate} → ${toDate} into ${chunks.length} chunk(s)`);
 
     let totalFetched = 0;
     let totalUpserted = 0;

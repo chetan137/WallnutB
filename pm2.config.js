@@ -10,7 +10,12 @@
  *   pm2 stop tally-sync              # stop
  *   pm2 save && pm2 startup          # auto-start on VM reboot
  *
- * max_memory_restart: 200M — critical for 4 GB VM shared with TallyPrime + PostgreSQL
+ * max_memory_restart: 512M — VM has 8 GB RAM shared with TallyPrime + PostgreSQL.
+ * Was 200M, which pm2 hit every time while parsing a large voucher XML
+ * response (fast-xml-parser builds a full JS object tree — comfortably
+ * more memory than the raw XML string) — pm2 killed and restarted the
+ * process mid-chunk, before anything reached Postgres, every single cycle.
+ * 512M leaves ample headroom on 8 GB alongside Tally + Postgres.
  */
 module.exports = {
   apps: [
@@ -19,8 +24,8 @@ module.exports = {
       script:             'index.js',
       cwd:                __dirname,
 
-      // Memory guard — restart if process exceeds 200 MB RAM
-      max_memory_restart: '200M',
+      // Memory guard — restart if process exceeds 512 MB RAM
+      max_memory_restart: '512M',
 
       // Wait before restarting on crash (ms)
       restart_delay:      5000,
