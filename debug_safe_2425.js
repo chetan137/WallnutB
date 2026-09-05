@@ -245,6 +245,75 @@ async function main() {
     console.log('         entirely (not TDL FILTER-based).');
   });
 
+  // ── STEP D — STEP C proved <FILTER> genuinely works (string equality on
+  // $VoucherTypeName narrowed 10,689 → 809). So the date FILTER in STEP B
+  // was fine as a mechanism but wrong as a FORMULA — referencing
+  // ##SVFROMDATE/##SVTODATE apparently doesn't resolve inside a Voucher
+  // collection's FILTER formula the way it does in a report. This tries a
+  // literal Tally date value embedded directly in the formula instead
+  // (the same way the literal string "Journal" worked), using Tally's
+  // native short-date format (D-Mon-YYYY).
+  await safely('STEP D', async () => {
+    section('STEP D — Literal date value in the FILTER formula (no ##SV reference)');
+
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    function toTallyLiteralDate(iso) {
+      const [y, m, d] = iso.split('-').map(Number);
+      return `${d}-${MONTHS[m - 1]}-${y}`;
+    }
+
+    const fromDate  = dbDateToIso(historical.fiscalYearFrom) || historical.fiscalYearFrom;
+    const narrowTo  = `${fromDate.slice(0, 8)}07`;
+    const fromLit   = toTallyLiteralDate(fromDate);
+    const toLit     = toTallyLiteralDate(narrowTo);
+
+    function buildLiteralDateFilterXml(companyName, fromLiteral, toLiteral) {
+      return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>LiteralDateCollection</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="LiteralDateCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FILTER>LiteralDateFilter</FILTER>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formula" NAME="LiteralDateFilter">$Date &gt;= $$Date:'${fromLiteral}' AND $Date &lt;= $$Date:'${toLiteral}'</SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+    }
+
+    console.log(`\nNARROW window (literal dates): ${fromLit} → ${toLit}`);
+    const t0 = Date.now();
+    const rawNarrow = await tallyClient.request(buildLiteralDateFilterXml(historical.tallyName, fromLit, toLit));
+    const narrowCount = countTag(rawNarrow, 'VOUCHER');
+    console.log(`  → ${rawNarrow.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${narrowCount}`);
+    if (narrowCount < 5) {
+      console.log('  First 700 chars:');
+      console.log('  ' + rawNarrow.slice(0, 700).replace(/\n/g, '\n  '));
+    }
+
+    console.log(`\nVERDICT: narrow (1 week, literal dates) = ${narrowCount} vs full total = 10689.`);
+    console.log('         If this is meaningfully less than 10689 (and > 0), literal date values in the');
+    console.log('         formula work — voucher sync can chunk by real calendar date ranges.');
+  });
+
   section('DONE — copy this whole output back to Claude for analysis.');
 }
 
