@@ -253,6 +253,17 @@ function parseVouchers(parsed, companyId) {
           const invRate   = parseRateString(inv.RATE);
           const invAmount = Math.abs(safeNum(inv.AMOUNT));
 
+          // BUG FIX: areaCity used to come only from narration parsing
+          // (narParsed.areaCity), which requires the "Area: X" structured
+          // format the OLD demo data used — verified live that real Tally
+          // narrations never match it, so areaCity was 0% populated across
+          // all 36,330 real inventory entries. This company doesn't track
+          // Area/District directly, but does track Godown per inventory
+          // line (confirmed live: real dispatch plants — "Kolhapur Plant",
+          // "Vadodara Plant", "Bhiwandi Godown") — the closest real
+          // geography dimension available, used here as a stand-in.
+          const godown = safeStr(inv.GODOWNNAME);
+
           inventoryEntries.push({
             itemName:     invItemName,
             quantity:     qtyParsed.qty,
@@ -260,7 +271,7 @@ function parseVouchers(parsed, companyId) {
             rate:         invRate,
             amount:       invAmount || totalAmount,
             salesOfficer: narParsed.salesOfficer,
-            areaCity:     narParsed.areaCity,
+            areaCity:     godown || narParsed.areaCity,
             state:        narParsed.state,
           });
         }
