@@ -6,8 +6,7 @@ const templates   = require('../tally/xmlTemplates');
 const parsers     = require('../tally/parsers');
 const syncLogs    = require('./syncLogs');
 const logger      = require('../utils/logger');
-const config      = require('../config');
-const { subtractDays, todayIso, dbDateToIso } = require('../utils/helpers');
+const { todayIso, dbDateToIso } = require('../utils/helpers');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -197,36 +196,32 @@ async function syncProfitAndLoss(company) {
 // ── Vouchers ───────────────────────────────────────────────────────────────────
 
 async function syncVouchers(company) {
-  const { id: companyId, tally_name: tallyName, fiscal_year_from, initial_sync_done, is_historical } = company;
+  const { id: companyId, tally_name: tallyName, initial_sync_done } = company;
   const t0 = Date.now();
   logStep('VOUCHERS', `start — company: "${company.name}"`);
   await syncLogs.startSync(companyId, 'vouchers');
 
   try {
-    // BUG FIX: this used to always be todayIso(), even for historical
-    // companies — every other sync* function here (trial balance, P&L,
-    // receipts & payments) correctly bounds a historical company's period
-    // to its fiscal year end. Requesting Day Book data for a closed company
-    // out to today's date is out of its own books' range; verified live
-    // that it produced a full historical company's vouchers all collapsed
-    // onto a single date instead of their real spread across the year.
-    const toDate = is_historical ? endOfFiscalYear(dbDateToIso(fiscal_year_from) || '2024-04-01') : todayIso();
-    let fromDate;
-
-    if (!initial_sync_done) {
-      fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
-      logStep('VOUCHERS', `FULL SYNC | range: ${fromDate} → ${toDate}`);
-    } else {
-      const lastSynced = await syncLogs.getLastSyncedDate(companyId, 'vouchers');
-      const base       = lastSynced || toDate;
-      fromDate         = subtractDays(base, config.sync.backfillDays);
-      logStep('VOUCHERS', `INCREMENTAL | range: ${fromDate} → ${toDate}`);
-    }
+    // BUG FIX: this used to build a date range (full-year for the first
+    // sync, then a short incremental window) and request REPORTNAME="Day
+    // Book" for it. Verified live (debug_investigation.js) that on this
+    // Tally installation "Day Book" specifically returns an unrelated
+    // "Import Data"/"All Masters"-shaped response no matter what date range
+    // is requested, while every other report name resolves normally —
+    // something (likely a TDL add-on) hooks that exact report name. Fixed
+    // by switching to an ad-hoc TDL Collection (see buildAllVouchersRequest
+    // in xmlTemplates.js), which bypasses "Day Book" entirely. That
+    // Collection type does NOT respect SVFROMDATE/SVTODATE (verified live:
+    // a 3-day window and a full-fiscal-year request both returned the
+    // exact same full voucher count), so there is no incremental range to
+    // compute any more — every run does a full pull and the upsert below
+    // (ON CONFLICT) keeps repeated full pulls correct and idempotent.
+    logStep('VOUCHERS', 'FULL PULL via ad-hoc Collection (Day Book is hijacked for this installation)');
 
     // ── Fetch ────────────────────────────────────────────────────────────────
     logStep('VOUCHERS', '📡 sending to Tally...');
     const fetchStart = Date.now();
-    const xml  = templates.buildAllVouchersRequest(tallyName, fromDate, toDate);
+    const xml  = templates.buildAllVouchersRequest(tallyName);
     const raw  = await tallyClient.request(xml);
     logStep('VOUCHERS', `📥 got ${humanBytes(raw.length)} in ${humanMs(Date.now() - fetchStart)}`);
 
@@ -239,19 +234,8 @@ async function syncVouchers(company) {
     logStep('VOUCHERS', `✅ parsed ${records.length} vouchers in ${humanMs(Date.now() - parseStart)}`);
 
     if (records.length === 0) {
-      await syncLogs.successSync(companyId, 'vouchers', toDate, { fetched: 0, upserted: 0 });
-      // BUG FIX: this used to call markInitialSyncDone() here too, on the
-      // very first sync attempt returning zero records. That permanently
-      // flips the company to incremental-only mode (which only ever looks
-      // back a few days) even if the zero result was transient — Tally not
-      // fully warmed up, a company just added, a momentary hiccup — and the
-      // real historical range then never gets fetched again. Verified live:
-      // this is exactly why one active company's vouchers only start from
-      // several months after its actual fiscal year began. Only mark the
-      // initial sync done once we've actually captured real records —
-      // if it's genuinely empty, the full-range request just retries next
-      // cycle, which is harmless.
-      logStep('VOUCHERS', '⏭  0 records — Tally has no data for this range (will retry full range next cycle if initial sync)');
+      await syncLogs.successSync(companyId, 'vouchers', todayIso(), { fetched: 0, upserted: 0 });
+      logStep('VOUCHERS', '⏭  0 records — Tally returned no vouchers for this company (will retry next cycle)');
       return;
     }
 
@@ -299,7 +283,7 @@ async function syncVouchers(company) {
       }
     });
 
-    await syncLogs.successSync(companyId, 'vouchers', toDate, { fetched: records.length, upserted });
+    await syncLogs.successSync(companyId, 'vouchers', todayIso(), { fetched: records.length, upserted });
     if (!initial_sync_done) await syncLogs.markInitialSyncDone(companyId);
     logStep('VOUCHERS ✅', `${upserted}/${records.length} in DB | DB write: ${humanMs(Date.now()-dbStart)} | total: ${humanMs(Date.now()-t0)}`);
 

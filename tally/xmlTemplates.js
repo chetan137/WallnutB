@@ -21,32 +21,61 @@ const { escapeXml, isoToTally } = require('../utils/helpers');
  */
 
 /**
- * Fetch ALL vouchers (all types) for a given date range.
- * Uses Day Book report — includes every voucher Tally recorded.
+ * Fetch ALL vouchers (all types) for a company via an ad-hoc TDL Collection.
+ *
+ * BUG FIX: this used to request REPORTNAME="Day Book" with SVFROMDATE/
+ * SVTODATE. Verified live (debug_investigation.js TESTs 1/5/6/7) that on
+ * this Tally installation "Day Book" specifically returns an unrelated
+ * "Import Data"/"All Masters"-shaped response regardless of the requested
+ * date range — while every other report name (Trial Balance, List of
+ * Accounts, Stock Summary, a deliberately nonexistent name) resolves
+ * normally (nonexistent names cleanly error "Could not find Report", ruling
+ * out a general gateway problem). Something in this installation — most
+ * likely a TDL add-on such as a GST e-invoice/e-way-bill tool — hooks that
+ * exact report name.
+ *
+ * Fix: bypass "Day Book" entirely using the same ad-hoc TDL Collection
+ * technique already proven for stock item costs (Export + TYPE=Collection +
+ * ID, not Export Data + REPORTNAME). Verified live this returns real
+ * per-voucher data — dates, ledger entries with real amounts, inventory
+ * entries with real items/qty/rate.
+ *
+ * IMPORTANT: unlike REPORTNAME-based reports, Collections of TYPE=Voucher do
+ * NOT respect SVFROMDATE/SVTODATE — verified live: a 3-day-window request
+ * and a full-fiscal-year request both returned the exact same full voucher
+ * count for the company. So this always fetches the company's ENTIRE
+ * voucher history; the caller's upsert (ON CONFLICT) keeps repeated full
+ * pulls correct and idempotent.
  *
  * @param {string} companyName  Exact Tally company name
- * @param {string} fromDate     ISO date "YYYY-MM-DD"
- * @param {string} toDate       ISO date "YYYY-MM-DD"
  * @returns {string}
  */
-function buildAllVouchersRequest(companyName, fromDate, toDate) {
+function buildAllVouchersRequest(companyName) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER>
-    <TALLYREQUEST>Export Data</TALLYREQUEST>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>VoucherCollection</ID>
   </HEADER>
   <BODY>
-    <EXPORTDATA>
-      <REQUESTDESC>
-        <REPORTNAME>Day Book</REPORTNAME>
-        <STATICVARIABLES>
-          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
-          <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
-          <SVTODATE>${isoToTally(toDate)}</SVTODATE>
-          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        </STATICVARIABLES>
-      </REQUESTDESC>
-    </EXPORTDATA>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="VoucherCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION</FETCH>
+            <FETCH>ALLLEDGERENTRIES.LIST</FETCH>
+            <FETCH>ALLINVENTORYENTRIES.LIST</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
   </BODY>
 </ENVELOPE>`;
 }

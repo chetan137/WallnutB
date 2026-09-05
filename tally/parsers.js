@@ -90,7 +90,13 @@ function getCollection(parsed) {
  * @returns {{ qty: number, unit: string }}
  */
 function parseQtyString(raw) {
-  const str = String(raw || '').trim();
+  // BUG FIX: used bare String(raw) — fine for a plain string, but the
+  // ad-hoc TDL Collection used to bypass "Day Book" (see xmlTemplates.js)
+  // returns quantity fields wrapped as {'@_TYPE':'Quantity','#text':'...'}
+  // objects, same shape as DATE. String(anObject) silently produces
+  // "[object Object]", which zeroes out every quantity. safeStr() already
+  // unwraps both a plain string and that object shape.
+  const str = safeStr(raw).trim();
   if (!str) return { qty: 0, unit: '' };
 
   // If string has '=', take the part after '=' (alternate UOM — usually the billing unit)
@@ -116,7 +122,8 @@ function parseQtyString(raw) {
  * @returns {number}
  */
 function parseRateString(raw) {
-  return Math.abs(parseFloat(String(raw || '')) || 0);
+  // Same object-unwrapping fix as parseQtyString() — see its comment.
+  return Math.abs(parseFloat(safeStr(raw)) || 0);
 }
 
 // ── Narration parser ────────────────────────────────────────────────────────────
@@ -199,10 +206,13 @@ function parseVouchers(parsed, companyId) {
         const vchNo     = safeStr(v.VOUCHERNUMBER) || `AUTO-${idx}-${Date.now()}`;
         const narration = safeStr(v.NARRATION);
 
-        // ── Extract ledger entries (LEDGERENTRIES.LIST is the correct Tally field) ──
-        // NOTE: We tried ALLLEDGERENTRIES.LIST — it does NOT exist in TallyPrime Day Book.
-        // The actual field name is LEDGERENTRIES.LIST (confirmed via raw XML inspection).
-        const ledgerLines   = ensureArray(v['LEDGERENTRIES.LIST']);
+        // ── Extract ledger entries ──────────────────────────────────────────
+        // Tag name varies by request method: the old "Day Book" report used
+        // LEDGERENTRIES.LIST; the ad-hoc TDL Collection now used to bypass
+        // "Day Book" (see xmlTemplates.js buildAllVouchersRequest) returns
+        // ALLLEDGERENTRIES.LIST instead — verified live via debug_investigation.js
+        // TEST 7. Checking both keeps this resilient to either shape.
+        const ledgerLines   = ensureArray(v['LEDGERENTRIES.LIST'] || v['ALLLEDGERENTRIES.LIST']);
         let totalAmount     = 0;
         const ledgerEntries = [];
 
