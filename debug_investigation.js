@@ -423,6 +423,74 @@ async function main() {
     console.log('         would be adding ledger/inventory entries back with proper nested TDL parts.');
   });
 
+  // ── TEST 7 — add LEDGERENTRIES.LIST / ALLINVENTORYENTRIES.LIST back in,
+  // on a TINY date window (3 days) so a bad result is small enough to read
+  // and a good result is small enough to be fast. Isolates whether compound
+  // list fields are fundamentally unfetchable this way, or whether TEST 6's
+  // first attempt broke because of the full-fiscal-year response size.
+  await safely('TEST 7', async () => {
+    const co = active || historical;
+    section(`TEST 7 — Add ledger + inventory entries back, tiny 3-day window (company: "${co.name}")`);
+
+    const today = todayIso();
+    const fromDate = subtractDays(today, 3);
+    console.log(`\nRequest: ${fromDate} → ${today} (last 3 days, scalar + LEDGERENTRIES.LIST + ALLINVENTORYENTRIES.LIST)`);
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>VoucherCollection2</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(co.tallyName)}</SVCURRENTCOMPANY>
+        <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
+        <SVTODATE>${isoToTally(today)}</SVTODATE>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="VoucherCollection2" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION</FETCH>
+            <FETCH>LEDGERENTRIES.LIST</FETCH>
+            <FETCH>ALLINVENTORYENTRIES.LIST</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+
+    const t0 = Date.now();
+    const raw = await tallyClient.request(xml);
+    console.log(`  → ${raw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}`);
+    console.log(`  <LEDGERENTRIES.LIST> tags: ${countTag(raw, 'LEDGERENTRIES\\.LIST')} | <ALLINVENTORYENTRIES.LIST> tags: ${countTag(raw, 'ALLINVENTORYENTRIES\\.LIST')}`);
+
+    const voucherBlocks = [...raw.matchAll(/<VOUCHER[ >][\s\S]*?<\/VOUCHER>/g)].map((m) => m[0]);
+    const realBlocks = voucherBlocks.filter((b) => b.length > 30);
+    console.log(`  <VOUCHER> blocks: ${voucherBlocks.length} | non-placeholder blocks: ${realBlocks.length}`);
+
+    if (realBlocks.length > 0) {
+      console.log('\n  First real voucher block (first 2500 chars):');
+      console.log('  ' + realBlocks[0].slice(0, 2500).replace(/\n/g, '\n  '));
+    } else {
+      console.log('  Unique tags in response:');
+      console.log('  ' + uniqueTags(raw).join(', '));
+      console.log('  First 2000 chars:');
+      console.log('  ' + raw.slice(0, 2000).replace(/\n/g, '\n  '));
+    }
+
+    console.log('\nVERDICT: if the voucher block shows real nested LEDGERENTRIES.LIST/ALLINVENTORYENTRIES.LIST');
+    console.log('         with LEDGERNAME/AMOUNT/STOCKITEMNAME populated, this fetch shape can fully replace');
+    console.log('         "Day Book". If it collapses to a placeholder again, compound fields need a');
+    console.log('         different TDL structure (nested PART/LINE) regardless of response size.');
+  });
+
   section('DONE — copy this whole output back to Claude for analysis.');
 }
 
