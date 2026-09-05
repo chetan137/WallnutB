@@ -305,6 +305,43 @@ async function main() {
     console.log('         or just that none of these 4 candidate names match this Tally version\'s internal name.');
   });
 
+  // ── TEST 5 — does a NONSENSE report name for the SAME (focused) company ──
+  // also return this "Import Data / All Masters" response? If yes, this
+  // proves the response has nothing to do with "Day Book" resolution — the
+  // focused company just returns this fixed/growing payload for ANY export
+  // request, regardless of what's actually asked. If instead we get a clean
+  // "Could not find Report" error (like TEST 3's first attempt did), that
+  // proves "Day Book" specifically is being intercepted/redirected while
+  // other report names resolve normally.
+  await safely('TEST 5', async () => {
+    const co = active || historical;
+    section(`TEST 5 — Nonsense REPORTNAME for company "${co.name}" (should error if names resolve normally)`);
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY><EXPORTDATA><REQUESTDESC>
+    <REPORTNAME>ThisReportDoesNotExist12345</REPORTNAME>
+    <STATICVARIABLES>
+      <SVCURRENTCOMPANY>${escapeXml(co.tallyName)}</SVCURRENTCOMPANY>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    </STATICVARIABLES>
+  </REQUESTDESC></EXPORTDATA></BODY>
+</ENVELOPE>`;
+
+    const raw = await tallyClient.request(xml);
+    const isError = /<LINEERROR>/i.test(raw);
+    console.log(`\n  → ${raw.length} bytes | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}${isError ? '  [Tally: ' + (raw.match(/<LINEERROR>([^<]*)<\/LINEERROR>/) || [, 'error'])[1] + ']' : ''}`);
+    if (!isError) {
+      console.log('  Not an error — first 800 chars:');
+      console.log('  ' + raw.slice(0, 800).replace(/\n/g, '\n  '));
+    }
+
+    console.log('\nVERDICT: "Could not find Report" here = report names resolve normally, "Day Book" is');
+    console.log('         specifically being redirected. Same All-Masters-style response here = this');
+    console.log('         company returns a fixed/growing payload for ANY export request, unrelated to REPORTNAME.');
+  });
+
   section('DONE — copy this whole output back to Claude for analysis.');
 }
 
