@@ -355,9 +355,16 @@ async function main() {
     const co = active || historical;
     section(`TEST 6 — Vouchers via ad-hoc TDL Collection, bypassing "Day Book" (company: "${co.name}")`);
 
+    // Narrowed to last 30 days and SCALAR fields only (no LEDGERENTRIES.LIST /
+    // ALLINVENTORYENTRIES.LIST yet) — TEST 6's first attempt requested those
+    // compound/multi-row fields directly in FETCH, which Tally can't expand
+    // without a proper nested PART/LINE definition, so it silently collapsed
+    // every voucher to a bare "<VOUCHER>0</VOUCHER>" placeholder (105MB of
+    // them). Proving scalar fields work first, on a small window, before
+    // widening the range or adding the compound fields back properly.
     const today = todayIso();
-    const fromDate = co.fiscalYearFrom;
-    console.log(`\nRequest: ${fromDate} → ${today} (full fiscal-year-to-date range)`);
+    const fromDate = subtractDays(today, 30);
+    console.log(`\nRequest: ${fromDate} → ${today} (last 30 days, scalar fields only)`);
 
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -379,7 +386,7 @@ async function main() {
         <TDLMESSAGE>
           <COLLECTION NAME="VoucherCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
             <TYPE>Voucher</TYPE>
-            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION, LEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST</FETCH>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -391,29 +398,29 @@ async function main() {
     const raw = await tallyClient.request(xml);
     console.log(`  → ${raw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}`);
 
-    if (countTag(raw, 'VOUCHER') < 50) {
+    const voucherBlocks = [...raw.matchAll(/<VOUCHER[ >][\s\S]*?<\/VOUCHER>/g)].map((m) => m[0]);
+    const realBlocks = voucherBlocks.filter((b) => b.length > 30); // skip bare "<VOUCHER>0</VOUCHER>" placeholders
+    console.log(`  <VOUCHER> blocks: ${voucherBlocks.length} | non-placeholder blocks: ${realBlocks.length}`);
+
+    if (realBlocks.length === 0) {
       console.log('  Unique tags in response:');
       console.log('  ' + uniqueTags(raw).join(', '));
       console.log('  First 2000 chars:');
       console.log('  ' + raw.slice(0, 2000).replace(/\n/g, '\n  '));
     } else {
-      // Real data — show date distribution like TEST 2 did, to confirm
-      // per-voucher dates actually spread across the requested range
-      // instead of collapsing onto one date.
-      const voucherBlocks = [...raw.matchAll(/<VOUCHER[ >][\s\S]*?<\/VOUCHER>/g)].map((m) => m[0]);
-      const dates = voucherBlocks.map((b) => (b.match(/<DATE>([^<]*)<\/DATE>/) || [])[1] || '');
+      const dates = realBlocks.map((b) => (b.match(/<DATE>([^<]*)<\/DATE>/) || [])[1] || '');
       const dateCounts = {};
       for (const d of dates) dateCounts[d] = (dateCounts[d] || 0) + 1;
-      console.log(`\n  <VOUCHER> blocks: ${voucherBlocks.length} | distinct dates: ${Object.keys(dateCounts).length}`);
+      console.log(`  distinct dates: ${Object.keys(dateCounts).length}`);
       console.log('  Date distribution (top 15):');
       Object.entries(dateCounts).sort((a, b) => b[1] - a[1]).slice(0, 15).forEach(([d, n]) => console.log(`    ${d}: ${n} vouchers`));
-      console.log('\n  First voucher block (first 1500 chars):');
-      console.log('  ' + voucherBlocks[0].slice(0, 1500).replace(/\n/g, '\n  '));
+      console.log('\n  First real voucher block (first 800 chars):');
+      console.log('  ' + realBlocks[0].slice(0, 800).replace(/\n/g, '\n  '));
     }
 
-    console.log('\nVERDICT: real VOUCHER count with dates spread across many days (not collapsed onto');
-    console.log('         one date, not the fake "All Masters" payload) = this collection approach can');
-    console.log('         replace REPORTNAME="Day Book" in buildAllVouchersRequest().');
+    console.log('\nVERDICT: real VOUCHER blocks with DATE/VOUCHERNUMBER/etc populated and dates spread');
+    console.log('         across the last 30 days = scalar fields work via this collection. Next step');
+    console.log('         would be adding ledger/inventory entries back with proper nested TDL parts.');
   });
 
   section('DONE — copy this whole output back to Claude for analysis.');
