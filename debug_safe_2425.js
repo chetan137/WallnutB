@@ -160,6 +160,91 @@ async function main() {
     console.log('         ever big enough to crash Tally again.');
   });
 
+  // ── STEP C — does the FILTER mechanism work AT ALL (blunt always-false),
+  // and does filtering by VOUCHER TYPE (a simple string comparison) work
+  // where a date comparison formula apparently didn't? Both scalar-only —
+  // safe regardless of the outcome.
+  await safely('STEP C', async () => {
+    section('STEP C — Is <FILTER> honored at all? (always-false, then VoucherTypeName)');
+
+    const alwaysFalseXml = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>NoneCollection</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(historical.tallyName)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="NoneCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FILTER>AlwaysFalse</FILTER>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formula" NAME="AlwaysFalse">0</SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+
+    console.log('\nAlways-false filter (formula literal 0) — expect 0 vouchers if FILTER is honored at all:');
+    const t0 = Date.now();
+    const rawFalse = await tallyClient.request(alwaysFalseXml);
+    const falseCount = countTag(rawFalse, 'VOUCHER');
+    console.log(`  → ${rawFalse.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${falseCount}`);
+
+    const typeFilterXml = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>TypeCollection</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(historical.tallyName)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="TypeCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FILTER>OnlyJournal</FILTER>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formula" NAME="OnlyJournal">$VoucherTypeName = "Journal"</SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+
+    console.log('\nVoucherTypeName = "Journal" filter — expect a SUBSET of the 10,689 total if this dimension works:');
+    const t1 = Date.now();
+    const rawType = await tallyClient.request(typeFilterXml);
+    const typeCount = countTag(rawType, 'VOUCHER');
+    console.log(`  → ${rawType.length} bytes in ${Date.now() - t1}ms | <VOUCHER> tags: ${typeCount}`);
+
+    console.log(`\nVERDICT: always-false=${falseCount} (want 0), Journal-only=${typeCount} (want < 10689).`);
+    console.log('         If always-false stays 10689, <FILTER> is not being honored at all for this');
+    console.log('         collection type in this Tally version — need a different chunking dimension');
+    console.log('         entirely (not TDL FILTER-based).');
+  });
+
   section('DONE — copy this whole output back to Claude for analysis.');
 }
 
