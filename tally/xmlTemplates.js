@@ -1,6 +1,6 @@
 'use strict';
 
-const { escapeXml, isoToTally } = require('../utils/helpers');
+const { escapeXml, isoToTally, isoToTallyLiteral } = require('../utils/helpers');
 
 /**
  * tally/xmlTemplates.js
@@ -40,28 +40,42 @@ const { escapeXml, isoToTally } = require('../utils/helpers');
  * per-voucher data — dates, ledger entries with real amounts, inventory
  * entries with real items/qty/rate.
  *
- * IMPORTANT: unlike REPORTNAME-based reports, Collections of TYPE=Voucher do
- * NOT respect SVFROMDATE/SVTODATE — verified live: a 3-day-window request
- * and a full-fiscal-year request both returned the exact same full voucher
- * count for the company. So this always fetches the company's ENTIRE
- * voucher history; the caller's upsert (ON CONFLICT) keeps repeated full
- * pulls correct and idempotent.
+ * BUG FIX 2 (superseded by BUG FIX 3 below — kept for history): Collections
+ * of TYPE=Voucher do NOT respect SVFROMDATE/SVTODATE — verified live: a
+ * 3-day-window request and a full-fiscal-year request both returned the
+ * exact same full voucher count. So an earlier version of this always
+ * fetched the company's ENTIRE voucher history in one request.
  *
- * BUG FIX 2: FETCHing the compound fields ALLLEDGERENTRIES.LIST and
+ * BUG FIX 3: one company here has 10,689 vouchers. Fetching ALL of them
+ * with ledger/inventory entries in a single request crashed Tally's own
+ * process outright — a genuine "Internal Error … Software Exception
+ * c0000005 (Memory Access Violation)" dialog, not just a slow response.
+ * Verified live (debug_safe_2425.js) that SVFROMDATE/SVTODATE staticvars
+ * and a FILTER formula referencing them by name (##SVFROMDATE/##SVTODATE)
+ * are both silently ignored for this collection type, but a FILTER formula
+ * comparing $Date against a LITERAL Tally date value — $$Date:'D-Mon-YYYY'
+ * embedded directly in the formula — genuinely narrows the result (a
+ * 1-week window returned 161 of 10,689). This function now takes a date
+ * range and the caller (syncVouchers) chunks a company's full history into
+ * month-sized calls so no single request is ever big enough to crash Tally.
+ *
+ * BUG FIX 4: FETCHing the compound fields ALLLEDGERENTRIES.LIST and
  * ALLINVENTORYENTRIES.LIST by their bare list name pulls Tally's ENTIRE
  * native schema for every entry — dozens of empty GST/VAT/TDS/Excise/
  * e-invoice fields per ledger and inventory line that nothing here reads.
- * Verified live: this made one company's response balloon to 105 MB, and
- * repeatedly hitting Tally with a request that size eventually crashed its
- * XML gateway outright (every request afterward, for BOTH companies,
- * started failing instantly with ECONNRESET). Fixed by using TDL's
- * "list.field" dotted FETCH syntax to request only the specific sub-fields
- * this parser actually reads, instead of the whole native object.
+ * Verified live: this made one company's response balloon to 105 MB.
+ * Fixed by using TDL's "list.field" dotted FETCH syntax to request only
+ * the specific sub-fields this parser actually reads, instead of the
+ * whole native object.
  *
  * @param {string} companyName  Exact Tally company name
+ * @param {string} fromDate     ISO date "YYYY-MM-DD" — start of this chunk
+ * @param {string} toDate       ISO date "YYYY-MM-DD" — end of this chunk
  * @returns {string}
  */
-function buildAllVouchersRequest(companyName) {
+function buildAllVouchersRequest(companyName, fromDate, toDate) {
+  const fromLiteral = isoToTallyLiteral(fromDate);
+  const toLiteral   = isoToTallyLiteral(toDate);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER>
@@ -80,10 +94,14 @@ function buildAllVouchersRequest(companyName) {
         <TDLMESSAGE>
           <COLLECTION NAME="VoucherCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
             <TYPE>Voucher</TYPE>
+            <FILTER>WallnutDateFilter</FILTER>
             <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION</FETCH>
             <FETCH>ALLLEDGERENTRIES.LEDGERNAME, ALLLEDGERENTRIES.AMOUNT, ALLLEDGERENTRIES.ISPARTYLEDGER, ALLLEDGERENTRIES.ISDEEMEDPOSITIVE</FETCH>
             <FETCH>ALLINVENTORYENTRIES.STOCKITEMNAME, ALLINVENTORYENTRIES.ACTUALQTY, ALLINVENTORYENTRIES.BILLEDQTY, ALLINVENTORYENTRIES.RATE, ALLINVENTORYENTRIES.AMOUNT</FETCH>
           </COLLECTION>
+        </TDLMESSAGE>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formula" NAME="WallnutDateFilter">$Date &gt;= $$Date:'${fromLiteral}' AND $Date &lt;= $$Date:'${toLiteral}'</SYSTEM>
         </TDLMESSAGE>
       </TDL>
     </DESC>

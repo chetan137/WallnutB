@@ -107,4 +107,60 @@ function todayIso() {
   return `${y}-${m}-${d}`;
 }
 
-module.exports = { escapeXml, isoToTally, tallyToIso, dbDateToIso, safeStr, safeNum, ensureArray, subtractDays, todayIso };
+const TALLY_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/**
+ * Converts ISO date "YYYY-MM-DD" to Tally's literal short-date format
+ * "D-Mon-YYYY" (e.g. "1-Apr-2024") — the format Tally's TDL formula engine
+ * accepts for a literal $$Date:'...' value inside a FILTER formula.
+ *
+ * Verified live (debug_safe_2425.js STEP D): STATICVARIABLES SVFROMDATE/
+ * SVTODATE do NOT filter a TYPE=Voucher ad-hoc Collection, and referencing
+ * them by name (##SVFROMDATE/##SVTODATE) inside a FILTER formula silently
+ * resolves to nothing (the comparison stayed always-true). A literal date
+ * value embedded directly in the formula does work — confirmed a 1-week
+ * window returned 161 of a company's 10,689 total vouchers.
+ */
+function isoToTallyLiteral(iso) {
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  return `${d}-${TALLY_MONTHS[m - 1]}-${y}`;
+}
+
+/**
+ * Splits [fromIso, toIso] into consecutive calendar-month ranges (each
+ * clipped to the overall bounds). Used to chunk a large voucher fetch into
+ * requests small enough that Tally doesn't run out of memory serializing
+ * the whole company's history in one go (verified live: a single company
+ * with 10,689 vouchers crashed Tally's own process — "Memory Access
+ * Violation" — when ledger/inventory entries were fetched for all of them
+ * at once).
+ *
+ * @param {string} fromIso  "YYYY-MM-DD"
+ * @param {string} toIso    "YYYY-MM-DD"
+ * @returns {Array<{from: string, to: string}>}
+ */
+function buildMonthlyRanges(fromIso, toIso) {
+  const ranges = [];
+  let cursor = new Date(`${fromIso}T00:00:00`);
+  const end  = new Date(`${toIso}T00:00:00`);
+  if (isNaN(cursor) || isNaN(end) || cursor > end) return ranges;
+
+  while (cursor <= end) {
+    const rangeFrom = new Date(cursor);
+    // Last day of this range's month, or the overall `end`, whichever is earlier.
+    const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
+    const rangeTo  = monthEnd < end ? monthEnd : end;
+
+    const toIsoStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    ranges.push({ from: toIsoStr(rangeFrom), to: toIsoStr(rangeTo) });
+
+    cursor = new Date(rangeTo);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return ranges;
+}
+
+module.exports = {
+  escapeXml, isoToTally, tallyToIso, dbDateToIso, safeStr, safeNum, ensureArray,
+  subtractDays, todayIso, isoToTallyLiteral, buildMonthlyRanges,
+};

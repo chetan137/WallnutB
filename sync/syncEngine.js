@@ -6,7 +6,7 @@ const templates   = require('../tally/xmlTemplates');
 const parsers     = require('../tally/parsers');
 const syncLogs    = require('./syncLogs');
 const logger      = require('../utils/logger');
-const { todayIso, dbDateToIso } = require('../utils/helpers');
+const { todayIso, dbDateToIso, buildMonthlyRanges } = require('../utils/helpers');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -195,97 +195,113 @@ async function syncProfitAndLoss(company) {
 
 // ── Vouchers ───────────────────────────────────────────────────────────────────
 
+/** Upserts one batch of parsed voucher records inside a single transaction. */
+async function upsertVoucherRecords(records) {
+  let upserted = 0;
+  await withTransaction(async (client) => {
+    for (const r of records) {
+      const vRes = await client.query(
+        `INSERT INTO vouchers (company_id,vch_no,date,vch_type,party_name,narration,total_amount)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (company_id,vch_no,vch_type)
+         DO UPDATE SET date=EXCLUDED.date, party_name=EXCLUDED.party_name,
+           narration=EXCLUDED.narration, total_amount=EXCLUDED.total_amount, synced_at=NOW()
+         RETURNING id`,
+        [r.companyId, r.vchNo, r.date, r.vchType, r.partyName, r.narration, r.totalAmount]
+      );
+      const voucherId = vRes.rows[0]?.id;
+      if (!voucherId) continue;
+
+      await client.query('DELETE FROM voucher_ledger_entries    WHERE voucher_id=$1', [voucherId]);
+      await client.query('DELETE FROM voucher_inventory_entries WHERE voucher_id=$1', [voucherId]);
+
+      for (const le of r.ledgerEntries) {
+        await client.query(
+          `INSERT INTO voucher_ledger_entries (voucher_id,ledger_name,amount,is_party_ledger,is_deemed_positive)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [voucherId, le.ledgerName, le.amount, le.isParty, le.isDeemedPositive]
+        );
+      }
+      for (const ie of r.inventoryEntries) {
+        await client.query(
+          `INSERT INTO voucher_inventory_entries (voucher_id,item_name,quantity,unit,rate,amount,sales_officer,area_city,state)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [voucherId, ie.itemName, ie.quantity, ie.unit, ie.rate, ie.amount,
+           ie.salesOfficer, ie.areaCity, ie.state]
+        );
+      }
+      upserted++;
+    }
+  });
+  return upserted;
+}
+
 async function syncVouchers(company) {
-  const { id: companyId, tally_name: tallyName, initial_sync_done } = company;
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, initial_sync_done, is_historical } = company;
   const t0 = Date.now();
   logStep('VOUCHERS', `start — company: "${company.name}"`);
   await syncLogs.startSync(companyId, 'vouchers');
 
   try {
-    // BUG FIX: this used to build a date range (full-year for the first
-    // sync, then a short incremental window) and request REPORTNAME="Day
-    // Book" for it. Verified live (debug_investigation.js) that on this
-    // Tally installation "Day Book" specifically returns an unrelated
-    // "Import Data"/"All Masters"-shaped response no matter what date range
-    // is requested, while every other report name resolves normally —
-    // something (likely a TDL add-on) hooks that exact report name. Fixed
-    // by switching to an ad-hoc TDL Collection (see buildAllVouchersRequest
-    // in xmlTemplates.js), which bypasses "Day Book" entirely. That
-    // Collection type does NOT respect SVFROMDATE/SVTODATE (verified live:
-    // a 3-day window and a full-fiscal-year request both returned the
-    // exact same full voucher count), so there is no incremental range to
-    // compute any more — every run does a full pull and the upsert below
-    // (ON CONFLICT) keeps repeated full pulls correct and idempotent.
-    logStep('VOUCHERS', 'FULL PULL via ad-hoc Collection (Day Book is hijacked for this installation)');
+    // BUG FIX: "Day Book" (REPORTNAME-based) is hijacked on this Tally
+    // installation — see buildAllVouchersRequest in xmlTemplates.js for the
+    // full history. Fixed by switching to an ad-hoc TDL Collection.
+    //
+    // BUG FIX 2: one company here has 10,689 vouchers. Fetching them ALL in
+    // one request (with ledger/inventory entries) crashed Tally's own
+    // process outright (Memory Access Violation), not just the network
+    // connection. Verified live that a literal-date FILTER formula
+    // genuinely narrows a Voucher collection (SVFROMDATE/SVTODATE alone do
+    // not). So every run now chunks the company's full date range into
+    // month-sized requests — small enough that no single one has crashed
+    // Tally in testing, and each chunk upserts independently so a failure
+    // partway through still keeps everything fetched so far.
+    const toDate   = is_historical ? endOfFiscalYear(dbDateToIso(fiscal_year_from) || '2024-04-01') : todayIso();
+    const fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
+    const chunks   = buildMonthlyRanges(fromDate, toDate);
+    logStep('VOUCHERS', `chunked ${fromDate} → ${toDate} into ${chunks.length} month(s)`);
 
-    // ── Fetch ────────────────────────────────────────────────────────────────
-    logStep('VOUCHERS', '📡 sending to Tally...');
-    const fetchStart = Date.now();
-    const xml  = templates.buildAllVouchersRequest(tallyName);
-    const raw  = await tallyClient.request(xml);
-    logStep('VOUCHERS', `📥 got ${humanBytes(raw.length)} in ${humanMs(Date.now() - fetchStart)}`);
+    let totalFetched = 0;
+    let totalUpserted = 0;
+    let anyChunkFailed = false;
 
-    // ── Parse ────────────────────────────────────────────────────────────────
-    const estTime = estimateParseTime(raw.length);
-    logStep('VOUCHERS', `⚙️  parsing ${humanBytes(raw.length)} — NOTE: output pauses here ${estTime} (normal)`);
-    const parseStart = Date.now();
-    const parsed  = tallyClient.parseXml(raw);
-    const records = parsers.parseVouchers(parsed, companyId);
-    logStep('VOUCHERS', `✅ parsed ${records.length} vouchers in ${humanMs(Date.now() - parseStart)}`);
+    for (let i = 0; i < chunks.length; i++) {
+      const { from: chunkFrom, to: chunkTo } = chunks[i];
+      const chunkLabel = `[${i + 1}/${chunks.length}] ${chunkFrom} → ${chunkTo}`;
 
-    if (records.length === 0) {
-      await syncLogs.successSync(companyId, 'vouchers', todayIso(), { fetched: 0, upserted: 0 });
-      logStep('VOUCHERS', '⏭  0 records — Tally returned no vouchers for this company (will retry next cycle)');
-      return;
+      try {
+        logStep('VOUCHERS', `📡 ${chunkLabel} — sending to Tally...`);
+        const fetchStart = Date.now();
+        const xml = templates.buildAllVouchersRequest(tallyName, chunkFrom, chunkTo);
+        const raw = await tallyClient.request(xml);
+        logStep('VOUCHERS', `📥 ${chunkLabel} — got ${humanBytes(raw.length)} in ${humanMs(Date.now() - fetchStart)}`);
+
+        const parsed  = tallyClient.parseXml(raw);
+        const records = parsers.parseVouchers(parsed, companyId);
+        logStep('VOUCHERS', `✅ ${chunkLabel} — parsed ${records.length} vouchers`);
+        totalFetched += records.length;
+
+        if (records.length > 0) {
+          const dbStart   = Date.now();
+          const upserted  = await upsertVoucherRecords(records);
+          totalUpserted  += upserted;
+          logStep('VOUCHERS', `💾 ${chunkLabel} — ${upserted}/${records.length} in DB (${humanMs(Date.now() - dbStart)})`);
+        }
+      } catch (chunkErr) {
+        anyChunkFailed = true;
+        logger.error(`[syncEngine] ❌ VOUCHERS chunk FAILED ${chunkLabel} "${company.name}": ${chunkErr.message}`);
+        // Keep going — a failed chunk shouldn't lose the chunks already fetched.
+      }
     }
 
-    // ── DB Upsert (inside transaction) ───────────────────────────────────────
-    logStep('VOUCHERS', `💾 writing ${records.length} vouchers inside 1 transaction (fast)...`);
-    const dbStart = Date.now();
-    let upserted = 0;
-
-    await withTransaction(async (client) => {
-      for (const r of records) {
-        const vRes = await client.query(
-          `INSERT INTO vouchers (company_id,vch_no,date,vch_type,party_name,narration,total_amount)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)
-           ON CONFLICT (company_id,vch_no,vch_type)
-           DO UPDATE SET date=EXCLUDED.date, party_name=EXCLUDED.party_name,
-             narration=EXCLUDED.narration, total_amount=EXCLUDED.total_amount, synced_at=NOW()
-           RETURNING id`,
-          [r.companyId, r.vchNo, r.date, r.vchType, r.partyName, r.narration, r.totalAmount]
-        );
-        const voucherId = vRes.rows[0]?.id;
-        if (!voucherId) continue;
-
-        await client.query('DELETE FROM voucher_ledger_entries    WHERE voucher_id=$1', [voucherId]);
-        await client.query('DELETE FROM voucher_inventory_entries WHERE voucher_id=$1', [voucherId]);
-
-        for (const le of r.ledgerEntries) {
-          await client.query(
-            `INSERT INTO voucher_ledger_entries (voucher_id,ledger_name,amount,is_party_ledger,is_deemed_positive)
-             VALUES ($1,$2,$3,$4,$5)`,
-            [voucherId, le.ledgerName, le.amount, le.isParty, le.isDeemedPositive]
-          );
-        }
-        for (const ie of r.inventoryEntries) {
-          await client.query(
-            `INSERT INTO voucher_inventory_entries (voucher_id,item_name,quantity,unit,rate,amount,sales_officer,area_city,state)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-            [voucherId, ie.itemName, ie.quantity, ie.unit, ie.rate, ie.amount,
-             ie.salesOfficer, ie.areaCity, ie.state]
-          );
-        }
-        upserted++;
-        if (upserted % 25 === 0 || upserted === records.length) {
-          progressBar('vouchers', upserted, records.length, dbStart);
-        }
-      }
-    });
-
-    await syncLogs.successSync(companyId, 'vouchers', todayIso(), { fetched: records.length, upserted });
-    if (!initial_sync_done) await syncLogs.markInitialSyncDone(companyId);
-    logStep('VOUCHERS ✅', `${upserted}/${records.length} in DB | DB write: ${humanMs(Date.now()-dbStart)} | total: ${humanMs(Date.now()-t0)}`);
+    await syncLogs.successSync(companyId, 'vouchers', todayIso(), { fetched: totalFetched, upserted: totalUpserted });
+    if (!initial_sync_done && !anyChunkFailed) await syncLogs.markInitialSyncDone(companyId);
+    logStep(
+      anyChunkFailed ? 'VOUCHERS ⚠️' : 'VOUCHERS ✅',
+      `${totalUpserted}/${totalFetched} in DB across ${chunks.length} chunk(s)` +
+        (anyChunkFailed ? ' — some chunks failed, will retry next cycle' : '') +
+        ` | total: ${humanMs(Date.now() - t0)}`
+    );
 
   } catch (err) {
     await syncLogs.failSync(companyId, 'vouchers', err.message);
