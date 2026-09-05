@@ -12,6 +12,8 @@
 
 require('dotenv').config();
 const tallyClient = require('./tally/client');
+const templates   = require('./tally/xmlTemplates');
+const parsers     = require('./tally/parsers');
 const config      = require('./config');
 const { isoToTally, todayIso, dbDateToIso, escapeXml } = require('./utils/helpers');
 
@@ -312,6 +314,42 @@ async function main() {
     console.log(`\nVERDICT: narrow (1 week, literal dates) = ${narrowCount} vs full total = 10689.`);
     console.log('         If this is meaningfully less than 10689 (and > 0), literal date values in the');
     console.log('         formula work — voucher sync can chunk by real calendar date ranges.');
+  });
+
+  // ── STEP E — the ACTUAL production request (templates.buildAllVouchersRequest,
+  // now date-chunked + literal-date FILTER + trimmed ledger/inventory FETCH),
+  // for ONE real month, on the company that has 10,689 total vouchers and
+  // has crashed Tally before. This is the final check before trusting pm2's
+  // automated cycle with it.
+  await safely('STEP E', async () => {
+    section(`STEP E — Production buildAllVouchersRequest() for ONE month chunk (company: "${historical.name}")`);
+
+    const fromDate = dbDateToIso(historical.fiscalYearFrom) || historical.fiscalYearFrom;
+    const toDate   = `${fromDate.slice(0, 8)}30`; // April has 30 days
+    console.log(`\nOne real production month chunk: ${fromDate} → ${toDate}`);
+
+    const t0 = Date.now();
+    const xml = templates.buildAllVouchersRequest(historical.tallyName, fromDate, toDate);
+    const raw = await tallyClient.request(xml);
+    console.log(`  → ${raw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}`);
+
+    const parsed  = tallyClient.parseXml(raw);
+    const records = parsers.parseVouchers(parsed, 1);
+    console.log(`  parsed ${records.length} voucher records`);
+    if (records.length > 0) {
+      const withInv = records.find((r) => r.inventoryEntries.length > 0);
+      const sample  = withInv || records[0];
+      console.log('  Sample parsed record:');
+      console.log('   ', JSON.stringify({
+        vchNo: sample.vchNo, date: sample.date, vchType: sample.vchType,
+        partyName: sample.partyName, totalAmount: sample.totalAmount,
+        ledgerEntries: sample.ledgerEntries.length,
+        inventoryEntries: sample.inventoryEntries.map((i) => ({ item: i.itemName, qty: i.quantity, rate: i.rate, amount: i.amount })),
+      }, null, 2).replace(/\n/g, '\n    '));
+    }
+
+    console.log('\nVERDICT: if this completes quickly with real amounts/items and no crash, one month');
+    console.log('         chunks are safe — pm2 can be trusted with the full chunked sync now.');
   });
 
   section('DONE — copy this whole output back to Claude for analysis.');
