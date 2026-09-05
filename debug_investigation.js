@@ -612,6 +612,81 @@ async function main() {
     console.log('\n(No historical company configured — skipping TEST 9)');
   }
 
+  // ── TEST 10 — does an explicit TDL FILTER formula actually scope the
+  // Voucher collection by date? STATICVARIABLES SVFROMDATE/SVTODATE alone
+  // do NOT filter this collection type (proven in TEST 6/7 — identical
+  // counts for a 3-day and a full-year window). This tries an explicit
+  // <FILTER> referencing a SYSTEM Formula that compares $Date against the
+  // SAME ##SVFROMDATE/##SVTODATE we already declare. Scalar-only + narrow
+  // windows, so a wrong/failing filter is cheap and fails fast rather than
+  // repeating TEST 6/7's multi-minute hangs.
+  function buildFilteredVoucherXml(companyName, fromIso, toIso) {
+    const from = isoToTally(fromIso);
+    const to   = isoToTally(toIso);
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>VoucherCollectionF</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+        <SVFROMDATE>${from}</SVFROMDATE>
+        <SVTODATE>${to}</SVTODATE>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="VoucherCollectionF" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FILTER>WallnutDateFilter</FILTER>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formula" NAME="WallnutDateFilter">$Date &gt;= ##SVFROMDATE AND $Date &lt;= ##SVTODATE</SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+  }
+
+  await safely('TEST 10', async () => {
+    const co = historical || active;
+    section(`TEST 10 — Does an explicit FILTER formula actually scope by date? (company: "${co.name}")`);
+
+    const narrowFrom = co.fiscalYearFrom;
+    const narrowDate = new Date(narrowFrom);
+    const narrowTo   = `${narrowDate.getFullYear()}-${String(narrowDate.getMonth() + 1).padStart(2, '0')}-07`; // first week only
+
+    console.log(`\nNARROW window: ${narrowFrom} → ${narrowTo} (first week of the fiscal year)`);
+    const t0 = Date.now();
+    const rawNarrow = await tallyClient.request(buildFilteredVoucherXml(co.tallyName, narrowFrom, narrowTo));
+    const narrowCount = countTag(rawNarrow, 'VOUCHER');
+    console.log(`  → ${rawNarrow.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${narrowCount}`);
+    if (narrowCount < 5) {
+      console.log('  First 800 chars:');
+      console.log('  ' + rawNarrow.slice(0, 800).replace(/\n/g, '\n  '));
+    }
+
+    const wideTo = co.isHistorical ? endOfFiscalYear(narrowFrom) : todayIso();
+    console.log(`\nWIDE window: ${narrowFrom} → ${wideTo} (full range)`);
+    const t1 = Date.now();
+    const rawWide = await tallyClient.request(buildFilteredVoucherXml(co.tallyName, narrowFrom, wideTo));
+    const wideCount = countTag(rawWide, 'VOUCHER');
+    console.log(`  → ${rawWide.length} bytes in ${Date.now() - t1}ms | <VOUCHER> tags: ${wideCount}`);
+
+    console.log(`\nVERDICT: narrow=${narrowCount} vs wide=${wideCount}.`);
+    console.log('         If narrow < wide, the FILTER formula genuinely scopes by date — we can chunk');
+    console.log('         voucher sync into small date ranges to avoid crashing Tally. If they\'re equal,');
+    console.log('         the FILTER isn\'t working either and a different chunking approach is needed.');
+  });
+
   section('DONE — copy this whole output back to Claude for analysis.');
 }
 
