@@ -159,6 +159,20 @@ async function main() {
       console.log('\nFirst 10 (vchNo | vchType | date):');
       parsed.slice(0, 10).forEach((p) => console.log(`  ${p.vchNo.padEnd(20)} | ${p.vchTyp.padEnd(20)} | ${p.date}`));
 
+      // Real date distribution across ALL 213 properly-scoped voucher blocks
+      // (the duplicate-key check below turned out to be a red herring — none
+      // of its duplicates actually span two different dates — so this is
+      // the real answer to "does the DB's single-date result match Tally's
+      // actual per-voucher dates, or is something being lost/miscounted").
+      const dateCounts = {};
+      for (const p of parsed) dateCounts[p.date] = (dateCounts[p.date] || 0) + 1;
+      console.log('\nDate distribution across all 213 <VOUCHER> blocks:');
+      Object.entries(dateCounts).sort((a, b) => b[1] - a[1]).forEach(([d, n]) => console.log(`  ${d}: ${n} vouchers`));
+
+      const march1 = parsed.filter((p) => p.date === '20250301');
+      console.log(`\nAll vouchers dated 20250301 (${march1.length}):`);
+      march1.slice(0, 20).forEach((p) => console.log(`  ${p.vchNo.padEnd(20)} | ${p.vchTyp}`));
+
       // Duplicate-key check — this is what tallybackend's ON CONFLICT (company_id, vch_no, vch_type) upserts by.
       const byKey = {};
       for (const p of parsed) {
