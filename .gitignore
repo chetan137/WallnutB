@@ -7,6 +7,7 @@ logs/*.log.gz
 
 # Debug / test scripts (dev only, not for production)
 debug_*.xml
+test*_response.xml
 testFetch.js
 debugXml.js
 

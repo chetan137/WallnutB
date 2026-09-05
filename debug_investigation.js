@@ -36,6 +36,7 @@
  */
 
 require('dotenv').config();
+const fs          = require('fs');
 const tallyClient = require('./tally/client');
 const config      = require('./config');
 const { isoToTally, subtractDays, todayIso, dbDateToIso, escapeXml } = require('./utils/helpers');
@@ -469,26 +470,45 @@ async function main() {
     const t0 = Date.now();
     const raw = await tallyClient.request(xml);
     console.log(`  → ${raw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(raw, 'VOUCHER')}`);
-    console.log(`  <LEDGERENTRIES.LIST> tags: ${countTag(raw, 'LEDGERENTRIES\\.LIST')} | <ALLINVENTORYENTRIES.LIST> tags: ${countTag(raw, 'ALLINVENTORYENTRIES\\.LIST')}`);
+    console.log(`  <ALLLEDGERENTRIES.LIST> tags: ${countTag(raw, 'ALLLEDGERENTRIES\\.LIST')} | <ALLINVENTORYENTRIES.LIST> tags: ${countTag(raw, 'ALLINVENTORYENTRIES\\.LIST')}`);
+    console.log(`  <AMOUNT> tags: ${countTag(raw, 'AMOUNT')} | <STOCKITEMNAME> tags: ${countTag(raw, 'STOCKITEMNAME')}`);
+
+    // Save to disk — this response cost 30+s and 100MB+ to fetch; save it
+    // once so later inspection (grepping for specific fields) doesn't need
+    // another live round-trip to Tally.
+    const outPath = require('path').join(__dirname, 'test7_response.xml');
+    fs.writeFileSync(outPath, raw);
+    console.log(`\n  Saved full raw response to: ${outPath}`);
 
     const voucherBlocks = [...raw.matchAll(/<VOUCHER[ >][\s\S]*?<\/VOUCHER>/g)].map((m) => m[0]);
     const realBlocks = voucherBlocks.filter((b) => b.length > 30);
     console.log(`  <VOUCHER> blocks: ${voucherBlocks.length} | non-placeholder blocks: ${realBlocks.length}`);
 
-    if (realBlocks.length > 0) {
-      console.log('\n  First real voucher block (first 2500 chars):');
-      console.log('  ' + realBlocks[0].slice(0, 2500).replace(/\n/g, '\n  '));
+    // Find a voucher that actually has inventory (STOCKITEMNAME present) —
+    // the first block we saw earlier was a Payment voucher with no items.
+    const withInventory = realBlocks.find((b) => b.includes('STOCKITEMNAME'));
+    if (withInventory) {
+      const idx = withInventory.indexOf('ALLINVENTORYENTRIES.LIST');
+      console.log('\n  First voucher WITH inventory — around ALLINVENTORYENTRIES.LIST (1500 chars):');
+      console.log('  ' + withInventory.slice(Math.max(0, idx - 100), idx + 1500).replace(/\n/g, '\n  '));
     } else {
-      console.log('  Unique tags in response:');
-      console.log('  ' + uniqueTags(raw).join(', '));
-      console.log('  First 2000 chars:');
-      console.log('  ' + raw.slice(0, 2000).replace(/\n/g, '\n  '));
+      console.log('\n  No voucher block in this response contains STOCKITEMNAME.');
     }
 
-    console.log('\nVERDICT: if the voucher block shows real nested LEDGERENTRIES.LIST/ALLINVENTORYENTRIES.LIST');
-    console.log('         with LEDGERNAME/AMOUNT/STOCKITEMNAME populated, this fetch shape can fully replace');
-    console.log('         "Day Book". If it collapses to a placeholder again, compound fields need a');
-    console.log('         different TDL structure (nested PART/LINE) regardless of response size.');
+    // Show AMOUNT in context from the first real block (any voucher type).
+    if (realBlocks.length > 0) {
+      const amtIdx = realBlocks[0].indexOf('AMOUNT');
+      if (amtIdx >= 0) {
+        console.log('\n  AMOUNT in context (first real block, 600 chars around first AMOUNT):');
+        console.log('  ' + realBlocks[0].slice(Math.max(0, amtIdx - 300), amtIdx + 300).replace(/\n/g, '\n  '));
+      } else {
+        console.log('\n  No AMOUNT tag found in the first real voucher block at all.');
+      }
+    }
+
+    console.log('\nVERDICT: if AMOUNT and STOCKITEMNAME/LEDGERNAME are populated with real values, this');
+    console.log('         fetch shape can fully replace "Day Book". test7_response.xml is saved for');
+    console.log('         further PowerShell Select-String inspection without re-fetching from Tally.');
   });
 
   section('DONE — copy this whole output back to Claude for analysis.');
