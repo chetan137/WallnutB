@@ -1,41 +1,44 @@
 'use strict';
 /**
- * debug_investigation.js
+ * debug_investigation.js  (v2)
  * ─────────────────────────────────────────────────────────────────────────────
- * One-shot diagnostic script — runs ON the VM (so it can reach Tally directly
- * on localhost:9000, no firewall changes needed). Investigates 4 open
- * questions from the current sync bug hunt:
+ * ⚠️  IMPORTANT — run this with tallybackend's own process FULLY STOPPED first
+ *     (pm2 stop tally-sync, or Ctrl+C if running `node index.js` directly).
+ *     Evidence from the first run: this script's requests got back a response
+ *     that clearly belonged to something else entirely (an "All Masters"/
+ *     REMOTECMPINFO company-info reply for a plain Day Book request) — that
+ *     only makes sense if tallybackend's OWN process was mid-sync (index.js
+ *     runs a full sync cycle immediately on startup) and both processes hit
+ *     Tally's single-request XML server at the same time. Tally is not
+ *     built to multiplex concurrent HTTP requests safely — running two
+ *     Tally-querying tools at once can genuinely cross-wire responses. This
+ *     may be a real contributor to the "some data right, some wrong"
+ *     inconsistency reported across the whole sync system, independent of
+ *     anything else this investigates.
  *
- *  TEST 1 — Company 2 (active): does a WIDE date range (fiscal-year-start to
- *           today) really return fewer/zero vouchers than a NARROW range
- *           covering a subset of that same period? (It did in production —
- *           full sync fetched 0, but 941 rows already exist from a narrower
- *           incremental sync.) This checks whether Tally silently caps/limits
- *           very wide Day Book exports.
+ * Run on the VM (with tallybackend stopped):  node debug_investigation.js
+ * Read-only — only EXPORTs from Tally, never writes, never touches Postgres.
  *
- *  TEST 2 — Company 1 (historical): are the raw <DATE> tags in Tally's own
- *           response actually all identical (a Tally/company behavior), or
- *           are there real varied dates that the parser is somehow losing
- *           (a parsing bug)? Prints every raw date tag found.
- *
- *  TEST 3 — Can a custom TDL <COLLECTION> with an explicit <FETCH> list pull
- *           PER-ITEM cost fields (ClosingRate, ClosingValue, StandardCost)
- *           from the STOCKITEM collection? tallybackend's current
- *           parseStockItems() only gets GROUP-level rollups via the "Stock
- *           Summary" report — this tests whether a proper item-level export
- *           is actually possible (needed for real gross-margin/ABC-by-value).
- *
- *  TEST 4 — Does this company have Tally Budgets configured at all? Tries a
- *           few likely REPORTNAME variants for the Budget Variance report.
- *
- * Run on the VM:  node debug_investigation.js
- * Safe to run any time — this only EXPORTS data, never writes to Tally or Postgres.
+ *  TEST 1 — Company 2 (active): wide vs narrow Day Book date range.
+ *  TEST 2 — Company 1 (historical): raw <DATE> tags, AND checks whether
+ *           duplicate (VOUCHERNUMBER, VCHTYPE) keys exist across the two
+ *           dates already found in the raw XML — if so, tallybackend's
+ *           ON CONFLICT (company_id, vch_no, vch_type) upsert would silently
+ *           let one date's row overwrite the other's, explaining why the DB
+ *           only ever shows one date despite Tally sending two.
+ *  TEST 3 — Per-item stock cost via the PROVEN-working ad-hoc TDL Collection
+ *           structure (Export/TYPE=Collection/ID + BODY>DESC>TDL — copied
+ *           from backend/services/tallyFetchService.js's working voucher
+ *           collection request, NOT the Export-Data/REPORTNAME pattern the
+ *           first run of this script wrongly used, which just errored
+ *           "Could not find Report").
+ *  TEST 4 — Whether Budgets are configured in Tally at all.
  */
 
 require('dotenv').config();
 const tallyClient = require('./tally/client');
 const config      = require('./config');
-const { isoToTally, subtractDays, todayIso, dbDateToIso } = require('./utils/helpers');
+const { isoToTally, subtractDays, todayIso, dbDateToIso, escapeXml } = require('./utils/helpers');
 
 function endOfFiscalYear(fromDate) {
   const d = new Date(fromDate);
@@ -50,7 +53,7 @@ function buildDayBookXml(companyName, fromTally, toTally) {
   <BODY><EXPORTDATA><REQUESTDESC>
     <REPORTNAME>Day Book</REPORTNAME>
     <STATICVARIABLES>
-      <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
+      <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
       <SVFROMDATE>${fromTally}</SVFROMDATE>
       <SVTODATE>${toTally}</SVTODATE>
       <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
@@ -79,6 +82,9 @@ async function safely(label, fn) {
 }
 
 async function main() {
+  console.log('⚠️  Reminder: tallybackend\'s own process (pm2 tally-sync / node index.js)');
+  console.log('   should be STOPPED right now — otherwise responses below may be unreliable.\n');
+
   const historical = config.companies.find((c) => c.isHistorical);
   const active     = config.companies.find((c) => !c.isHistorical);
 
@@ -97,26 +103,35 @@ async function main() {
       const wideRaw = await tallyClient.request(buildDayBookXml(active.tallyName, isoToTally(wideFrom), isoToTally(today)));
       console.log(`  → ${wideRaw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${countTag(wideRaw, 'VOUCHER')} | <TALLYMESSAGE> tags: ${countTag(wideRaw, 'TALLYMESSAGE')}`);
       if (countTag(wideRaw, 'VOUCHER') === 0) {
-        console.log('  First 1500 chars of WIDE response (to see if it is an error/empty envelope):');
+        console.log('  First 1500 chars of WIDE response:');
         console.log('  ' + wideRaw.slice(0, 1500).replace(/\n/g, '\n  '));
       }
+
+      // Small pause so this request is fully done before the next one — no overlap possible.
+      await new Promise((r) => setTimeout(r, 1000));
 
       const narrowFrom = subtractDays(today, 60);
       console.log(`\nNARROW request: ${narrowFrom} → ${today} (last 60 days)`);
       const t1 = Date.now();
       const narrowRaw = await tallyClient.request(buildDayBookXml(active.tallyName, isoToTally(narrowFrom), isoToTally(today)));
       console.log(`  → ${narrowRaw.length} bytes in ${Date.now() - t1}ms | <VOUCHER> tags: ${countTag(narrowRaw, 'VOUCHER')} | <TALLYMESSAGE> tags: ${countTag(narrowRaw, 'TALLYMESSAGE')}`);
+      if (countTag(narrowRaw, 'VOUCHER') === 0) {
+        console.log('  First 1500 chars of NARROW response:');
+        console.log('  ' + narrowRaw.slice(0, 1500).replace(/\n/g, '\n  '));
+      }
 
-      console.log('\nVERDICT: if WIDE found ~0 vouchers but NARROW found hundreds, Tally is capping/limiting very wide Day Book exports for this company.');
+      console.log('\nVERDICT: if both now show real <VOUCHER> counts (hundreds), last run\'s empty/wrong');
+      console.log('         responses were caused by tallybackend\'s own process running concurrently.');
+      console.log('         If WIDE is still 0 while NARROW has hundreds, Tally itself is capping wide exports.');
     });
   } else {
     console.log('\n(No active/non-historical company configured — skipping TEST 1)');
   }
 
-  // ── TEST 2 — raw DATE tags for the HISTORICAL company ────────────────────
+  // ── TEST 2 — raw DATE tags + duplicate-key check for the HISTORICAL company
   if (historical) {
     await safely('TEST 2', async () => {
-      section(`TEST 2 — Historical company "${historical.name}": raw <DATE> tag values`);
+      section(`TEST 2 — Historical company "${historical.name}": raw <DATE> tags + duplicate-key check`);
 
       const fromDate = dbDateToIso(historical.fiscalYearFrom) || historical.fiscalYearFrom;
       const toDate = endOfFiscalYear(fromDate);
@@ -127,51 +142,82 @@ async function main() {
       const dates = [...raw.matchAll(/<DATE>([^<]*)<\/DATE>/g)].map((m) => m[1]);
       const distinct = [...new Set(dates)];
       console.log(`\nTotal <DATE> tags found: ${dates.length}`);
-      console.log(`Distinct date values: ${distinct.length}`);
-      console.log(`All distinct values: ${distinct.join(', ')}`);
-      console.log(`First 15 raw (in document order): ${dates.slice(0, 15).join(', ')}`);
+      console.log(`Distinct date values: ${distinct.length} — ${distinct.join(', ')}`);
 
-      // Also check VOUCHERNUMBER alongside DATE to see if different vouchers really share one date
-      const pairs = [...raw.matchAll(/<VOUCHERNUMBER>([^<]*)<\/VOUCHERNUMBER>[\s\S]{0,400}?<DATE>([^<]*)<\/DATE>/g)]
-        .slice(0, 10)
-        .map((m) => `${m[1]} → ${m[2]}`);
-      console.log('\nFirst 10 (VOUCHERNUMBER → DATE) pairs found near each other in the raw XML:');
-      pairs.forEach((p) => console.log('  ' + p));
+      // Properly scope each <VOUCHER ...>...</VOUCHER> block and pull its own
+      // VOUCHERNUMBER + VOUCHERTYPENAME + DATE — no cross-voucher spillover.
+      const voucherBlocks = [...raw.matchAll(/<VOUCHER[ >][\s\S]*?<\/VOUCHER>/g)].map((m) => m[0]);
+      console.log(`\n<VOUCHER>...</VOUCHER> blocks found: ${voucherBlocks.length}`);
 
-      console.log('\nVERDICT: if distinct date values > 1, the parser is losing real dates (parsing bug — fixable).');
-      console.log('         if distinct date values === 1, Tally itself reports this closed company\'s entries under one date (needs a different sync strategy, not a parser fix).');
+      const parsed = voucherBlocks.map((block) => {
+        const vchNo  = (block.match(/<VOUCHERNUMBER>([^<]*)<\/VOUCHERNUMBER>/) || [])[1] || '';
+        const vchTyp = (block.match(/<VOUCHERTYPENAME>([^<]*)<\/VOUCHERTYPENAME>/) || [])[1] || '';
+        const date   = (block.match(/<DATE>([^<]*)<\/DATE>/) || [])[1] || '';
+        return { vchNo, vchTyp, date };
+      });
+
+      console.log('\nFirst 10 (vchNo | vchType | date):');
+      parsed.slice(0, 10).forEach((p) => console.log(`  ${p.vchNo.padEnd(20)} | ${p.vchTyp.padEnd(20)} | ${p.date}`));
+
+      // Duplicate-key check — this is what tallybackend's ON CONFLICT (company_id, vch_no, vch_type) upserts by.
+      const byKey = {};
+      for (const p of parsed) {
+        const key = `${p.vchNo}::${p.vchTyp}`;
+        if (!byKey[key]) byKey[key] = [];
+        byKey[key].push(p.date);
+      }
+      const dupes = Object.entries(byKey).filter(([, dates]) => dates.length > 1);
+      console.log(`\nDuplicate (vchNo, vchType) keys found: ${dupes.length} out of ${Object.keys(byKey).length} unique keys`);
+      if (dupes.length > 0) {
+        console.log('Sample duplicates (key → dates seen for that SAME key):');
+        dupes.slice(0, 10).forEach(([key, ds]) => console.log(`  ${key}  →  ${ds.join(', ')}`));
+        console.log('\n⚠️  If any of these show TWO DIFFERENT dates for the same key, that confirms the bug:');
+        console.log('    tallybackend\'s UPSERT (ON CONFLICT company_id,vch_no,vch_type) lets whichever');
+        console.log('    one gets processed LAST silently overwrite the other — one real voucher is lost.');
+      }
+
+      console.log('\nVERDICT: distinct dates > 1 in raw Tally data + duplicate keys spanning those dates');
+      console.log('         = confirmed upsert-key collision bug, not a parsing bug and not "Tally reports one date".');
     });
   } else {
     console.log('\n(No historical company configured — skipping TEST 2)');
   }
 
-  // ── TEST 3 — per-item stock cost via custom TDL Collection ───────────────
+  // ── TEST 3 — per-item stock cost via the PROVEN ad-hoc TDL Collection ────
   await safely('TEST 3', async () => {
     const co = active || historical;
-    section(`TEST 3 — Per-item stock cost via custom TDL Collection (company: "${co.name}")`);
+    section(`TEST 3 — Per-item stock cost via ad-hoc TDL Collection (company: "${co.name}")`);
 
+    // Structure copied from backend/services/tallyFetchService.js's
+    // buildLiveSalesRequest(), which is the one proven working ad-hoc
+    // collection request in this codebase (Export + TYPE=Collection + ID,
+    // not Export Data + REPORTNAME — that pattern only resolves NAMED
+    // built-in reports, which is why the last run errored "Could not find
+    // Report 'StockItemCostCollection'").
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
-  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>StockItemCostCollection</ID>
+  </HEADER>
   <BODY>
-    <EXPORTDATA>
-      <REQUESTDESC>
-        <REPORTNAME>StockItemCostCollection</REPORTNAME>
-        <STATICVARIABLES>
-          <SVCURRENTCOMPANY>${co.tallyName}</SVCURRENTCOMPANY>
-          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        </STATICVARIABLES>
-      </REQUESTDESC>
-    </EXPORTDATA>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(co.tallyName)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="StockItemCostCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>StockItem</TYPE>
+            <FETCH>Name, ClosingBalance, ClosingValue, ClosingRate, StandardCost, CostingMethod, BaseUnits</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
   </BODY>
-  <TDL>
-    <TDLMESSAGE>
-      <COLLECTION NAME="StockItemCostCollection" ISINITIALIZE="Yes">
-        <TYPE>StockItem</TYPE>
-        <FETCH>Name, ClosingBalance, ClosingValue, ClosingRate, StandardCost, CostingMethod, BaseUnits</FETCH>
-      </COLLECTION>
-    </TDLMESSAGE>
-  </TDL>
 </ENVELOPE>`;
 
     const raw = await tallyClient.request(xml);
@@ -179,10 +225,11 @@ async function main() {
     console.log('\nAll unique tags in response:');
     const tags = new Set([...raw.matchAll(/<([A-Z][A-Z0-9_.]*)[>\s/]/g)].map((m) => m[1]));
     console.log('  ' + [...tags].sort().join(', '));
-    console.log('\nFirst 2500 chars:');
-    console.log(raw.slice(0, 2500));
+    console.log('\nFirst 3000 chars:');
+    console.log(raw.slice(0, 3000));
 
-    console.log('\nVERDICT: if <STOCKITEM> tags > 0 with real item names + ClosingRate/StandardCost values, this custom-collection approach works and can replace the group-level Stock Summary fallback.');
+    console.log('\nVERDICT: if <STOCKITEM> tags > 0 with real item names + ClosingRate/StandardCost values,');
+    console.log('         this ad-hoc collection works and can replace the group-level Stock Summary fallback.');
   });
 
   // ── TEST 4 — does this company have Tally Budgets configured? ────────────
@@ -194,7 +241,7 @@ async function main() {
     const fromDate = dbDateToIso(co.fiscalYearFrom) || co.fiscalYearFrom;
     const toDate = co.isHistorical ? endOfFiscalYear(fromDate) : today;
 
-    const candidates = ['Group Budget Variances', 'Budget Variance', 'Group Budget Variance'];
+    const candidates = ['Group Budget Variances', 'Budget Variance', 'Group Budget Variance', 'Cost Centre Budget Variance'];
     for (const reportName of candidates) {
       console.log(`\nTrying REPORTNAME="${reportName}" (${fromDate} → ${toDate})...`);
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -203,7 +250,7 @@ async function main() {
   <BODY><EXPORTDATA><REQUESTDESC>
     <REPORTNAME>${reportName}</REPORTNAME>
     <STATICVARIABLES>
-      <SVCURRENTCOMPANY>${co.tallyName}</SVCURRENTCOMPANY>
+      <SVCURRENTCOMPANY>${escapeXml(co.tallyName)}</SVCURRENTCOMPANY>
       <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
       <SVTODATE>${isoToTally(toDate)}</SVTODATE>
       <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
@@ -212,17 +259,19 @@ async function main() {
 </ENVELOPE>`;
       try {
         const raw = await tallyClient.request(xml);
-        const hasLine = /<LINEERROR>|Unknown Report|does not exist/i.test(raw);
-        console.log(`  → ${raw.length} bytes${hasLine ? '  [Tally reports an error / unknown report]' : ''}`);
-        if (!hasLine && raw.length > 200) {
-          console.log('  First 1000 chars:');
-          console.log('  ' + raw.slice(0, 1000).replace(/\n/g, '\n  '));
+        const isError = /<LINEERROR>/i.test(raw);
+        console.log(`  → ${raw.length} bytes${isError ? '  [Tally: ' + (raw.match(/<LINEERROR>([^<]*)<\/LINEERROR>/) || [,'error'])[1] + ']' : ''}`);
+        if (!isError && raw.length > 200) {
+          console.log('  First 1200 chars:');
+          console.log('  ' + raw.slice(0, 1200).replace(/\n/g, '\n  '));
         }
       } catch (err) {
         console.log(`  → request failed: ${err.message}`);
       }
     }
-    console.log('\nVERDICT: a real, non-error response with BDMAINAMT/similar budget-amount tags means budgets ARE configured and syncable. An error/empty response for all 3 names means no budgets are set up in Tally — nothing to sync.');
+    console.log('\nVERDICT: a real, non-error response with budget-amount tags means budgets ARE configured.');
+    console.log('         "Could not find Report" for all names is inconclusive — could mean no budgets,');
+    console.log('         or just that none of these 4 candidate names match this Tally version\'s internal name.');
   });
 
   section('DONE — copy this whole output back to Claude for analysis.');
