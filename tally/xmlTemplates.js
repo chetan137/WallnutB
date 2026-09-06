@@ -68,6 +68,23 @@ const { escapeXml, isoToTally, isoToTallyLiteral } = require('../utils/helpers')
  * the specific sub-fields this parser actually reads, instead of the
  * whole native object.
  *
+ * BUG FIX 5: real Tally voucher printouts show a "Cost Centre/Classes"
+ * field per ledger line (e.g. "Mr. Kamlesh Dave") that maps to the real
+ * Sales Officer/Manager — narration parsing never had this (real
+ * narrations are free text, nothing structured in them). Verified live
+ * (debug_cost_centre_test.js) this sits nested two levels inside a ledger
+ * entry: ALLLEDGERENTRIES.LIST > CATEGORYALLOCATIONS.LIST >
+ * COSTCENTREALLOCATIONS.LIST > NAME. Also verified live: unlike the
+ * ONE-level dot-notation BUG FIX 4 relies on, trying to FETCH this nested
+ * path directly (ALLLEDGERENTRIES.CATEGORYALLOCATIONS.COSTCENTREALLOC-
+ * ATIONS.NAME) does NOT trim the response at all — identical ~9.9MB for
+ * the same window whether requesting the bare list or that "trimmed"
+ * path. So reaching cost centre means paying BUG FIX 4's bloat cost after
+ * all, just for ALLLEDGERENTRIES (ALLINVENTORYENTRIES stays trimmed —
+ * cost centre isn't there). Kept safe by the sync engine's existing
+ * date-chunking (small chunks keep the per-request voucher count, and
+ * therefore the bloat, bounded — same mitigation BUG FIX 3 relies on).
+ *
  * @param {string} companyName  Exact Tally company name
  * @param {string} fromDate     ISO date "YYYY-MM-DD" — start of this chunk
  * @param {string} toDate       ISO date "YYYY-MM-DD" — end of this chunk
@@ -96,7 +113,7 @@ function buildAllVouchersRequest(companyName, fromDate, toDate) {
             <TYPE>Voucher</TYPE>
             <FILTER>WallnutDateFilter</FILTER>
             <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION</FETCH>
-            <FETCH>ALLLEDGERENTRIES.LEDGERNAME, ALLLEDGERENTRIES.AMOUNT, ALLLEDGERENTRIES.ISPARTYLEDGER, ALLLEDGERENTRIES.ISDEEMEDPOSITIVE</FETCH>
+            <FETCH>ALLLEDGERENTRIES.LIST</FETCH>
             <FETCH>ALLINVENTORYENTRIES.STOCKITEMNAME, ALLINVENTORYENTRIES.ACTUALQTY, ALLINVENTORYENTRIES.BILLEDQTY, ALLINVENTORYENTRIES.RATE, ALLINVENTORYENTRIES.AMOUNT, ALLINVENTORYENTRIES.GODOWNNAME</FETCH>
           </COLLECTION>
         </TDLMESSAGE>

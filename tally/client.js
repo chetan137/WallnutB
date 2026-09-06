@@ -20,6 +20,8 @@ const ALWAYS_ARRAY = new Set([
   'ALLLEDGERENTRIES.LIST',    // Kept for compatibility with older Tally versions
   'ALLINVENTORYENTRIES.LIST',
   'BILLALLOCATIONS.LIST',
+  'CATEGORYALLOCATIONS.LIST', // Cost centre category wrapper, nested inside a ledger entry
+  'COSTCENTREALLOCATIONS.LIST', // Cost centre allocation (real Sales Officer/Manager name) — nested inside CATEGORYALLOCATIONS.LIST
   'DSPACCNAME',               // Stock Summary display format
   'DSPSTKINFO',               // Stock Summary display format
 ]);

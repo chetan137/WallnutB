@@ -126,6 +126,51 @@ function parseRateString(raw) {
   return Math.abs(parseFloat(safeStr(raw)) || 0);
 }
 
+// ── Cost Centre → Sales Officer/Manager ─────────────────────────────────────────
+
+/**
+ * A ledger entry's cost centre allocation is real Sales Officer/Manager data
+ * on real vouchers (verified live via debug_cost_centre_test.js — e.g.
+ * "Mr. Kamlesh Dave", "Mr. Hemant Jain", "Mr. Vaibhav Pawar" against real
+ * Sales vouchers), but the SAME mechanism is also used for non-person
+ * allocations that would be wrong to store as a salesperson — confirmed live:
+ * "Account" and "Branch Transfer - Sales" showed up as cost centre names on
+ * some entries. Every real salesperson name seen so far carries an honorific
+ * prefix; this is a conservative filter, not an exhaustive roster — a real
+ * salesperson whose Tally cost centre name has no prefix would be missed
+ * (left blank) rather than risk mislabeling a non-person allocation.
+ * @param {string} name
+ * @returns {boolean}
+ */
+function looksLikeSalesPerson(name) {
+  return /^(Mr|Mrs|Ms|Miss|Shri|Smt)\.?\s+\S/i.test(name);
+}
+
+/**
+ * Finds the real Sales Officer/Manager name for one voucher from its ledger
+ * entries' cost centre allocations. Real structure (verified live):
+ *   ALLLEDGERENTRIES.LIST > CATEGORYALLOCATIONS.LIST > COSTCENTREALLOCATIONS.LIST > NAME
+ * Takes the first person-like name found across every ledger entry — a
+ * voucher may have several ledger lines (party, income, tax, round-off) but
+ * only the income line typically carries a person cost centre.
+ * @param {Array} ledgerLines  Raw ALLLEDGERENTRIES.LIST / LEDGERENTRIES.LIST array
+ * @returns {string}
+ */
+function findSalesOfficerFromCostCentres(ledgerLines) {
+  for (const l of ledgerLines) {
+    if (typeof l !== 'object' || l === null) continue;
+    const categoryAllocs = ensureArray(l['CATEGORYALLOCATIONS.LIST']);
+    for (const cat of categoryAllocs) {
+      const costCentreAllocs = ensureArray(cat?.['COSTCENTREALLOCATIONS.LIST']);
+      for (const cc of costCentreAllocs) {
+        const name = safeStr(cc?.NAME);
+        if (name && looksLikeSalesPerson(name)) return name;
+      }
+    }
+  }
+  return '';
+}
+
 // ── Narration parser ────────────────────────────────────────────────────────────
 
 /**
@@ -234,6 +279,9 @@ function parseVouchers(parsed, companyId) {
           ledgerEntries.push({ ledgerName, amount, isParty, isDeemedPositive });
         }
 
+        // Real Sales Officer/Manager — see findSalesOfficerFromCostCentres doc.
+        const costCentreSalesOfficer = findSalesOfficerFromCostCentres(ledgerLines);
+
         // ── Extract inventory entries (ALLINVENTORYENTRIES.LIST) ──────────
         // Tally qty strings: "6000.000 Kgs =  300.000 Bags" → 300 Bags
         // Tally rate strings: "242.00/Bags" → 242
@@ -270,7 +318,7 @@ function parseVouchers(parsed, companyId) {
             unit:         qtyParsed.unit,
             rate:         invRate,
             amount:       invAmount || totalAmount,
-            salesOfficer: narParsed.salesOfficer,
+            salesOfficer: costCentreSalesOfficer || narParsed.salesOfficer,
             areaCity:     godown || narParsed.areaCity,
             state:        narParsed.state,
           });
@@ -295,7 +343,7 @@ function parseVouchers(parsed, companyId) {
             amount:       narParsed.rate > 0 && narParsed.quantity > 0
                             ? narParsed.rate * narParsed.quantity
                             : totalAmount,
-            salesOfficer: narParsed.salesOfficer,
+            salesOfficer: costCentreSalesOfficer || narParsed.salesOfficer,
             areaCity:     narParsed.areaCity,
             state:        narParsed.state,
           });
