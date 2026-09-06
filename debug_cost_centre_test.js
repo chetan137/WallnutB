@@ -2,31 +2,29 @@
 /**
  * debug_cost_centre_test.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Real Tally voucher printouts show a "Cost Centre/Classes" field per line
- * (e.g. "Mr. Nikhil", "Mr. Vaibhav Pawar") — this looks like exactly the
- * Sales Officer/Manager data previously confirmed unavailable (narration
- * parsing only ever matched the old demo format; real narrations are free
- * text with nothing structured in them). Cost Centre is a separate Tally
- * mechanism (per-ledger-entry cost allocation), worth checking on its own.
+ * v4 — CONFIRMED (v3 output): Cost Centre allocations are real and reachable.
+ * A window of 20-31 Mar 2025 in "Wallnut 24-25" returned 78 real allocations —
+ * <ALLLEDGERENTRIES.LIST><CATEGORYALLOCATIONS.LIST><CATEGORY>Primary Cost
+ * Category</CATEGORY><COSTCENTREALLOCATIONS.LIST><NAME>Mr. Kamlesh
+ * Dave</NAME><AMOUNT>...</AMOUNT></COSTCENTREALLOCATIONS.LIST>
+ * </CATEGORYALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST> — real names: Mr.
+ * Kamlesh Dave, Mr. Hemant Jain, Mr. Vaibhav Pawar (plus non-salesperson
+ * entries like "Account" and "Branch Transfer - Sales" that aren't real
+ * officers and would need filtering out later).
  *
- * v3 — only one Tally company is ever connected at a time, and right now
- * that's "Wallnut 24-25" (not the company the original screenshots came
- * from), so this no longer targets specific voucher numbers from a
- * different company. Instead it samples a small REAL window inside 24-25's
- * own confirmed date range (Mar 2025 — real invoices confirmed to exist
- * there earlier this session, e.g. ESS JAY EMPORIUM bills dated Jan-Mar
- * 2025) and inspects whatever it gets back, same technique as
- * debug_godown_test.js used for GODOWNNAME.
+ * BUT that test fetched the BARE ALLLEDGERENTRIES.LIST (Tally's entire
+ * native schema per entry, same bloat BUG FIX 4 in xmlTemplates.js already
+ * fixed once) — 9.8 MB for just 540 vouchers / 11 days. Unusable across a
+ * whole company's voucher history in production.
  *
- * v2 bugs (fixed here too): raw.indexOf('<VOUCHER') also matches
- * <VOUCHERTYPE>/<VOUCHERNUMBERSERIES> etc. earlier in the response, so
- * slicing "the voucher block" that way grabs the wrong chunk — this prints
- * the complete raw response instead, no slicing.
+ * This tests whether the TRIMMED 3-level dot-path — ALLLEDGERENTRIES.
+ * CATEGORYALLOCATIONS.CATEGORY and ALLLEDGERENTRIES.CATEGORYALLOCATIONS.
+ * COSTCENTREALLOCATIONS.NAME — still returns the real cost-centre names
+ * without the bloat. Established so far: 1-level dot-notation
+ * (ALLLEDGERENTRIES.AMOUNT etc.) works reliably; this is 2-3 levels deep,
+ * unverified until now.
  *
  * Run: node debug_cost_centre_test.js
- * (Loops every configured company — whichever one Tally doesn't currently
- * have connected will just get 0 real vouchers back, which is expected and
- * fine; only the currently-connected company's attempt matters right now.)
  */
 
 require('dotenv').config();
@@ -34,9 +32,8 @@ const tallyClient = require('./tally/client');
 const config      = require('./config');
 const { escapeXml } = require('./utils/helpers');
 
-// A window confirmed to have real vouchers in "Wallnut 24-25" specifically
-// (its actual data range is 2024-04-01 to 2025-03-31) — near the FY end,
-// where bills_receivable showed real Jan-Mar 2025 invoices for real parties.
+// Same window as the confirmed-working v3 test, for a direct before/after
+// byte-size and content comparison.
 const WINDOW_FROM = '20-Mar-2025';
 const WINDOW_TO   = '31-Mar-2025';
 
@@ -49,7 +46,7 @@ async function tryCompany(co) {
     <VERSION>1</VERSION>
     <TALLYREQUEST>Export</TALLYREQUEST>
     <TYPE>Collection</TYPE>
-    <ID>CostCentreTest</ID>
+    <ID>CostCentreTrimmedTest</ID>
   </HEADER>
   <BODY>
     <DESC>
@@ -59,11 +56,13 @@ async function tryCompany(co) {
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
-          <COLLECTION NAME="CostCentreTest" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+          <COLLECTION NAME="CostCentreTrimmedTest" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
             <TYPE>Voucher</TYPE>
             <FILTER>CostCentreDateFilter</FILTER>
             <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME</FETCH>
-            <FETCH>ALLLEDGERENTRIES.LIST</FETCH>
+            <FETCH>ALLLEDGERENTRIES.LEDGERNAME, ALLLEDGERENTRIES.AMOUNT</FETCH>
+            <FETCH>ALLLEDGERENTRIES.CATEGORYALLOCATIONS.CATEGORY</FETCH>
+            <FETCH>ALLLEDGERENTRIES.CATEGORYALLOCATIONS.COSTCENTREALLOCATIONS.NAME</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
         <TDLMESSAGE>
@@ -82,24 +81,15 @@ async function tryCompany(co) {
   if (voucherCount === 0) {
     console.log('0 vouchers — first 800 chars of response:');
     console.log(raw.slice(0, 800));
-    return false;
+    return;
   }
 
-  const costCentreMatches = [...raw.matchAll(/<COSTCENTREALLOCATIONS\.LIST>[\s\S]*?<\/COSTCENTREALLOCATIONS\.LIST>/g)];
-  const categoryMatches   = [...raw.matchAll(/<CATEGORYALLOCATIONS\.LIST>[\s\S]*?<\/CATEGORYALLOCATIONS\.LIST>/g)];
-  console.log(`COSTCENTREALLOCATIONS.LIST blocks: ${costCentreMatches.length} | CATEGORYALLOCATIONS.LIST blocks: ${categoryMatches.length}`);
+  const nameMatches = [...raw.matchAll(/<NAME[^>]*>([^<]*)<\/NAME>/g)].map((m) => m[1]).filter(Boolean);
+  const distinctNames = [...new Set(nameMatches)];
+  console.log(`<NAME> tags found: ${nameMatches.length} | distinct values: ${distinctNames.join(', ') || '(none)'}`);
 
-  if (costCentreMatches.length === 0 && categoryMatches.length === 0) {
-    console.log('Neither tag found in this response — no cost centre data came back for this window.');
-    return true;
-  }
-
-  console.log('\n--- COSTCENTREALLOCATIONS.LIST blocks ---');
-  costCentreMatches.forEach((m, i) => console.log(`[${i}] ${m[0].replace(/\s+/g, ' ').trim()}`));
-  console.log('\n--- CATEGORYALLOCATIONS.LIST blocks ---');
-  categoryMatches.forEach((m, i) => console.log(`[${i}] ${m[0].replace(/\s+/g, ' ').trim()}`));
-
-  return true;
+  console.log('\nFirst 2500 chars of response (to see the actual trimmed shape):');
+  console.log(raw.slice(0, 2500));
 }
 
 async function main() {
@@ -109,10 +99,10 @@ async function main() {
     });
   }
   console.log('\n─────────────────────────────────────────');
-  console.log('Paste this ENTIRE output back. Whichever company is currently connected in');
-  console.log('Tally should show real <VOUCHER> tags > 0 with real dates/party names — that');
-  console.log('one\'s COSTCENTREALLOCATIONS/CATEGORYALLOCATIONS result (or lack of one) is');
-  console.log('what tells us whether Cost Centre is reachable this way.');
+  console.log('Compare byte size against v3\'s 9,818,089 bytes for the same window.');
+  console.log('If distinct names above include real people (Mr. Kamlesh Dave / Mr. Hemant');
+  console.log('Jain / Mr. Vaibhav Pawar) at a MUCH smaller byte size, the trimmed dot-path');
+  console.log('works and is safe to wire into the real sync.');
 }
 
 main().catch((err) => {
