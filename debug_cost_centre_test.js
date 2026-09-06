@@ -9,26 +9,24 @@
  * text with nothing structured in them). Cost Centre is a separate Tally
  * mechanism (per-ledger-entry cost allocation), worth checking on its own.
  *
- * v2 — simplified after v1's compound date+voucher-number filter produced a
- * confusing 1-record "match" in the WRONG company (Wallnut 24-25, whose real
- * data doesn't reach March 2026 at all) with garbage-looking content. That
- * was two bugs in the debug script itself, not a Tally finding:
- *   1. The printed "voucher block" used raw.indexOf('<VOUCHER') to find the
- *      start — but that substring also matches <VOUCHERTYPE>, <VOUCHERNUMBER-
- *      SERIES> etc. anywhere earlier in the response, so it sliced the wrong
- *      chunk (some unrelated all-zero classification-ID fields).
- *   2. The compound (date range) AND (voucher A OR voucher B) formula may not
- *      have evaluated the way a simple single-clause filter reliably does —
- *      already-proven filters in this codebase (xmlTemplates.js) are always
- *      ONE clause, never a nested AND/OR combination like that.
+ * v3 — only one Tally company is ever connected at a time, and right now
+ * that's "Wallnut 24-25" (not the company the original screenshots came
+ * from), so this no longer targets specific voucher numbers from a
+ * different company. Instead it samples a small REAL window inside 24-25's
+ * own confirmed date range (Mar 2025 — real invoices confirmed to exist
+ * there earlier this session, e.g. ESS JAY EMPORIUM bills dated Jan-Mar
+ * 2025) and inspects whatever it gets back, same technique as
+ * debug_godown_test.js used for GODOWNNAME.
  *
- * This version drops the date range (single-field FILTER already proven
- * reliable per earlier live testing — see xmlTemplates.js BUG FIX 3), tests
- * ONE voucher number at a time, and always prints the ENTIRE raw response
- * (it's tiny for a single-voucher match) instead of trying to slice out
- * "the voucher block" — no ambiguity about what Tally actually returned.
+ * v2 bugs (fixed here too): raw.indexOf('<VOUCHER') also matches
+ * <VOUCHERTYPE>/<VOUCHERNUMBERSERIES> etc. earlier in the response, so
+ * slicing "the voucher block" that way grabs the wrong chunk — this prints
+ * the complete raw response instead, no slicing.
  *
  * Run: node debug_cost_centre_test.js
+ * (Loops every configured company — whichever one Tally doesn't currently
+ * have connected will just get 0 real vouchers back, which is expected and
+ * fine; only the currently-connected company's attempt matters right now.)
  */
 
 require('dotenv').config();
@@ -36,10 +34,14 @@ const tallyClient = require('./tally/client');
 const config      = require('./config');
 const { escapeXml } = require('./utils/helpers');
 
-const TARGET_VOUCHER_NUMBERS = ['WBSIMK-602/25-26', 'WBSIMK-607/25-26'];
+// A window confirmed to have real vouchers in "Wallnut 24-25" specifically
+// (its actual data range is 2024-04-01 to 2025-03-31) — near the FY end,
+// where bills_receivable showed real Jan-Mar 2025 invoices for real parties.
+const WINDOW_FROM = '20-Mar-2025';
+const WINDOW_TO   = '31-Mar-2025';
 
-async function tryOne(co, voucherNumber) {
-  console.log(`\n=== Company: ${co.name} (Tally: "${co.tallyName}") | Voucher: ${voucherNumber} ===`);
+async function tryCompany(co) {
+  console.log(`\n=== Company: ${co.name} (Tally: "${co.tallyName}") | window ${WINDOW_FROM} → ${WINDOW_TO} ===`);
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -59,13 +61,13 @@ async function tryOne(co, voucherNumber) {
         <TDLMESSAGE>
           <COLLECTION NAME="CostCentreTest" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
             <TYPE>Voucher</TYPE>
-            <FILTER>CostCentreVoucherFilter</FILTER>
+            <FILTER>CostCentreDateFilter</FILTER>
             <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME</FETCH>
             <FETCH>ALLLEDGERENTRIES.LIST</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
         <TDLMESSAGE>
-          <SYSTEM TYPE="Formula" NAME="CostCentreVoucherFilter">$VoucherNumber = "${voucherNumber}"</SYSTEM>
+          <SYSTEM TYPE="Formula" NAME="CostCentreDateFilter">$Date &gt;= $$Date:'${WINDOW_FROM}' AND $Date &lt;= $$Date:'${WINDOW_TO}'</SYSTEM>
         </TDLMESSAGE>
       </TDL>
     </DESC>
@@ -76,33 +78,41 @@ async function tryOne(co, voucherNumber) {
   const raw = await tallyClient.request(xml);
   const voucherCount = (raw.match(/<VOUCHER[ >]/g) || []).length;
   console.log(`→ ${raw.length} bytes in ${Date.now() - t0}ms | <VOUCHER> tags: ${voucherCount}`);
-  console.log('--- FULL raw response ---');
-  console.log(raw);
-  console.log('--- end raw response ---');
 
-  return voucherCount > 0;
+  if (voucherCount === 0) {
+    console.log('0 vouchers — first 800 chars of response:');
+    console.log(raw.slice(0, 800));
+    return false;
+  }
+
+  const costCentreMatches = [...raw.matchAll(/<COSTCENTREALLOCATIONS\.LIST>[\s\S]*?<\/COSTCENTREALLOCATIONS\.LIST>/g)];
+  const categoryMatches   = [...raw.matchAll(/<CATEGORYALLOCATIONS\.LIST>[\s\S]*?<\/CATEGORYALLOCATIONS\.LIST>/g)];
+  console.log(`COSTCENTREALLOCATIONS.LIST blocks: ${costCentreMatches.length} | CATEGORYALLOCATIONS.LIST blocks: ${categoryMatches.length}`);
+
+  if (costCentreMatches.length === 0 && categoryMatches.length === 0) {
+    console.log('Neither tag found in this response — no cost centre data came back for this window.');
+    return true;
+  }
+
+  console.log('\n--- COSTCENTREALLOCATIONS.LIST blocks ---');
+  costCentreMatches.forEach((m, i) => console.log(`[${i}] ${m[0].replace(/\s+/g, ' ').trim()}`));
+  console.log('\n--- CATEGORYALLOCATIONS.LIST blocks ---');
+  categoryMatches.forEach((m, i) => console.log(`[${i}] ${m[0].replace(/\s+/g, ' ').trim()}`));
+
+  return true;
 }
 
 async function main() {
-  let foundAny = false;
   for (const co of config.companies) {
-    for (const vn of TARGET_VOUCHER_NUMBERS) {
-      const found = await tryOne(co, vn).catch((err) => {
-        console.error(`  ERROR for ${co.name} / ${vn}: ${err.message}`);
-        return false;
-      });
-      foundAny = foundAny || found;
-    }
+    await tryCompany(co).catch((err) => {
+      console.error(`  ERROR for ${co.name}: ${err.message}`);
+    });
   }
-
   console.log('\n─────────────────────────────────────────');
-  console.log('Paste this ENTIRE output back — look for any tag containing "COSTCENTRE" or');
-  console.log('"CATEGORYALLOCATIONS" in whichever attempt actually found a real voucher (real');
-  console.log('DATE/PARTYLEDGERNAME/AMOUNT values present, not all-zero placeholder fields).');
-  if (!foundAny) {
-    console.log('0 matches everywhere — could mean neither company currently has this exact');
-    console.log('voucher reachable in whatever period/company Tally has focused right now.');
-  }
+  console.log('Paste this ENTIRE output back. Whichever company is currently connected in');
+  console.log('Tally should show real <VOUCHER> tags > 0 with real dates/party names — that');
+  console.log('one\'s COSTCENTREALLOCATIONS/CATEGORYALLOCATIONS result (or lack of one) is');
+  console.log('what tells us whether Cost Centre is reachable this way.');
 }
 
 main().catch((err) => {
