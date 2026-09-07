@@ -1,6 +1,6 @@
 'use strict';
 
-const { safeStr, safeNum, ensureArray, tallyToIso } = require('../utils/helpers');
+const { safeStr, safeNum, ensureArray, tallyToIso, tallyDateTimeToIso } = require('../utils/helpers');
 const logger = require('../utils/logger');
 
 /**
@@ -376,6 +376,78 @@ function parseVouchers(parsed, companyId) {
   return records;
 }
 
+// ── parseEwayBills ───────────────────────────────────────────────────────────
+
+/**
+ * Parses e-way bill data from the same ad-hoc Voucher Collection technique
+ * used for parseVouchers, but from buildEwayBillRequest's leaner fetch (no
+ * ledger/inventory entries — just voucher header + EWAYBILLDETAILS.LIST).
+ *
+ * Verified live structure (debug_eway_bill_2526.js):
+ *   VOUCHER > PARTYGSTIN, IRN (top-level scalars)
+ *   VOUCHER > EWAYBILLDETAILS.LIST > BILLNUMBER, BILLDATE, DOCUMENTTYPE,
+ *             VALIDUPTO, UPDATEDDATE
+ *   VOUCHER > EWAYBILLDETAILS.LIST > TRANSPORTDETAILS.LIST >
+ *             TRANSPORTERNAME, VEHICLENUMBER, ISPARTBUPDATED, DISTANCE
+ *
+ * Only vouchers with a real BILLNUMBER are returned — a Sales voucher with
+ * no e-way bill generated (or the rarer "conflict with masters" case seen in
+ * Tally's own report) simply has no EWAYBILLDETAILS.LIST content and is
+ * skipped, not stored as an empty/placeholder row.
+ *
+ * @param {Object} parsed     fast-xml-parser output
+ * @param {number} companyId  FK for companies.id
+ * @returns {Array}
+ */
+function parseEwayBills(parsed, companyId) {
+  const records = [];
+  try {
+    const collection = getCollection(parsed);
+    const vouchers    = ensureArray(collection?.VOUCHER);
+
+    vouchers.forEach((v, idx) => {
+      try {
+        const ewayBillDetails = ensureArray(v['EWAYBILLDETAILS.LIST'])[0];
+        if (!ewayBillDetails || typeof ewayBillDetails !== 'object') return;
+
+        const ewayBillNo = safeStr(ewayBillDetails.BILLNUMBER);
+        if (!ewayBillNo) return; // No real e-way bill on this voucher — skip.
+
+        const date  = tallyToIso(safeStr(v.DATE));
+        const vchNo = safeStr(v.VOUCHERNUMBER);
+        if (!date || !vchNo) return;
+
+        const transportDetails = ensureArray(ewayBillDetails['TRANSPORTDETAILS.LIST'])[0] || {};
+
+        records.push({
+          companyId,
+          vchNo,
+          vchType:         safeStr(v.VOUCHERTYPENAME),
+          date,
+          partyGstin:      safeStr(v.PARTYGSTIN),
+          irn:             safeStr(v.IRN),
+          ewayBillNo,
+          ewayBillDate:    tallyToIso(safeStr(ewayBillDetails.BILLDATE)),
+          documentType:    safeStr(ewayBillDetails.DOCUMENTTYPE),
+          validUpto:       tallyDateTimeToIso(safeStr(ewayBillDetails.VALIDUPTO)),
+          updatedDate:     tallyDateTimeToIso(safeStr(ewayBillDetails.UPDATEDDATE)),
+          transporterName: safeStr(transportDetails.TRANSPORTERNAME),
+          vehicleNumber:   safeStr(transportDetails.VEHICLENUMBER),
+          distanceKm:      safeNum(transportDetails.DISTANCE),
+          hasPartB:        safeStr(transportDetails.ISPARTBUPDATED).toLowerCase() === 'yes',
+          status:          'generated',
+        });
+      } catch (innerErr) {
+        logger.warn(`[parsers] Skipped e-way bill voucher idx=${idx}: ${innerErr.message}`);
+      }
+    });
+  } catch (outerErr) {
+    logger.error(`[parsers] parseEwayBills outer error: ${outerErr.message}`);
+  }
+
+  return records;
+}
+
 // ── parseLedgers ───────────────────────────────────────────────────────────────
 
 /**
@@ -593,7 +665,7 @@ function parseBillsReceivable(raw, companyId) {
   return records;
 }
 
-module.exports = { parseVouchers, parseLedgers, parseStockItems, parseOutstanding, parseBillsPayable, parseBillsReceivable };
+module.exports = { parseVouchers, parseEwayBills, parseLedgers, parseStockItems, parseOutstanding, parseBillsPayable, parseBillsReceivable };
 
 
 /**

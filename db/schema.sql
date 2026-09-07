@@ -247,29 +247,38 @@ CREATE TABLE IF NOT EXISTS pl_items (
 );
 
 -- ─── e-Way Bills ──────────────────────────────────────────────────────────────
--- One row per voucher shown in Tally's GST Reports > Exchange Reports >
--- e-Way Bill > "e-Way Bill - Voucher Register". Columns confirmed directly
--- from real Tally screenshots (Date/Particulars/GSTIN/Vch Type/Vch No/
--- Invoice Amount + Part B status) — eway_bill_no/eway_bill_date are
--- nullable pending confirmation of whether Tally's XML API exposes the
--- actual e-way bill number/date or only voucher-level generated/Part-B
--- status (see debug_eway_bill_test.js).
--- Replaced fully on each sync (status can change — e.g. "conflict with
--- masters" resolving to "generated" — for the same voucher over time).
+-- One row per voucher with real e-way bill data, from Tally's GST Reports >
+-- Exchange Reports > e-Way Bill. Structure verified live (debug_eway_bill_
+-- 2526.js): sits directly on the VOUCHER (not nested in ledger entries like
+-- Cost Centre) as EWAYBILLDETAILS.LIST > BILLNUMBER/BILLDATE/VALIDUPTO/
+-- UPDATEDDATE/DOCUMENTTYPE, with TRANSPORTDETAILS.LIST > TRANSPORTERNAME/
+-- VEHICLENUMBER/ISPARTBUPDATED nested one level deeper; PARTYGSTIN and IRN
+-- are cheap top-level scalar fields. No invoice_amount/party_name columns —
+-- these vouchers already exist in the `vouchers` table from the regular
+-- voucher sync, so the API layer joins on (company_id, vch_no, vch_type)
+-- rather than duplicating that data here (this module only stores what's
+-- NEW: e-way-bill-specific fields).
+-- Replaced fully on each sync — status can change for the same voucher
+-- over time (e.g. Part B gets updated after transport is arranged).
 CREATE TABLE IF NOT EXISTS eway_bills (
-  id              SERIAL PRIMARY KEY,
-  company_id      INT  NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  vch_no          TEXT NOT NULL,
-  vch_type        TEXT,
-  date            DATE NOT NULL,
-  party_name      TEXT,
-  party_gstin     TEXT,
-  invoice_amount  NUMERIC(15, 2) NOT NULL DEFAULT 0,
-  eway_bill_no    TEXT,
-  eway_bill_date  DATE,
-  has_part_b      BOOLEAN NOT NULL DEFAULT FALSE,
-  status          TEXT,    -- e.g. 'generated' | 'conflict_with_masters'
-  synced_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  id                SERIAL PRIMARY KEY,
+  company_id        INT  NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  vch_no            TEXT NOT NULL,
+  vch_type          TEXT,
+  date              DATE NOT NULL,
+  party_gstin       TEXT,
+  irn               TEXT,
+  eway_bill_no      TEXT,             -- EWAYBILLDETAILS.LIST > BILLNUMBER
+  eway_bill_date    DATE,             -- EWAYBILLDETAILS.LIST > BILLDATE
+  document_type     TEXT,             -- e.g. "Tax Invoice"
+  valid_upto        TIMESTAMP,        -- EWAYBILLDETAILS.LIST > VALIDUPTO
+  updated_date      TIMESTAMP,        -- EWAYBILLDETAILS.LIST > UPDATEDDATE
+  transporter_name  TEXT,             -- TRANSPORTDETAILS.LIST > TRANSPORTERNAME
+  vehicle_number    TEXT,             -- TRANSPORTDETAILS.LIST > VEHICLENUMBER
+  distance_km       NUMERIC(10, 2),   -- TRANSPORTDETAILS.LIST > DISTANCE
+  has_part_b        BOOLEAN NOT NULL DEFAULT FALSE,  -- TRANSPORTDETAILS.LIST > ISPARTBUPDATED
+  status            TEXT,    -- 'generated' — only rows with a real eway_bill_no are stored for now
+  synced_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (company_id, vch_no, vch_type)
 );
 

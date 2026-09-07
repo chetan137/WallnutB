@@ -174,7 +174,21 @@ function buildDateChunks(fromIso, toIso, maxDaysPerChunk = 7) {
   return ranges;
 }
 
+/**
+ * Converts Tally's datetime format "YYYYMMDDHHMMSSmmm" (17 digits, e.g.
+ * "20260906235900000" = 2026-09-06 23:59:00.000) to an ISO datetime string
+ * usable as a Postgres TIMESTAMP literal. Used for e-way bill VALIDUPTO/
+ * UPDATEDDATE fields. Returns null if input isn't a valid 17-digit string.
+ */
+function tallyDateTimeToIso(raw) {
+  const s = String(raw || '').replace(/\D/g, '');
+  if (s.length !== 17) return null;
+  const y = s.slice(0, 4), mo = s.slice(4, 6), d = s.slice(6, 8);
+  const h = s.slice(8, 10), mi = s.slice(10, 12), se = s.slice(12, 14);
+  return `${y}-${mo}-${d}T${h}:${mi}:${se}`;
+}
+
 module.exports = {
   escapeXml, isoToTally, tallyToIso, dbDateToIso, safeStr, safeNum, ensureArray,
-  subtractDays, todayIso, isoToTallyLiteral, buildDateChunks,
+  subtractDays, todayIso, isoToTallyLiteral, buildDateChunks, tallyDateTimeToIso,
 };

@@ -345,6 +345,118 @@ async function syncVouchers(company) {
   }
 }
 
+// ── e-Way Bills ────────────────────────────────────────────────────────────────
+
+/** Upserts one batch of parsed e-way bill records. */
+async function upsertEwayBillRecords(records) {
+  let upserted = 0;
+  await withTransaction(async (client) => {
+    for (const r of records) {
+      await client.query(
+        `INSERT INTO eway_bills
+           (company_id, vch_no, vch_type, date, party_gstin, irn,
+            eway_bill_no, eway_bill_date, document_type, valid_upto, updated_date,
+            transporter_name, vehicle_number, distance_km, has_part_b, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         ON CONFLICT (company_id, vch_no, vch_type)
+         DO UPDATE SET date=EXCLUDED.date, party_gstin=EXCLUDED.party_gstin,
+           irn=EXCLUDED.irn, eway_bill_no=EXCLUDED.eway_bill_no,
+           eway_bill_date=EXCLUDED.eway_bill_date, document_type=EXCLUDED.document_type,
+           valid_upto=EXCLUDED.valid_upto, updated_date=EXCLUDED.updated_date,
+           transporter_name=EXCLUDED.transporter_name, vehicle_number=EXCLUDED.vehicle_number,
+           distance_km=EXCLUDED.distance_km, has_part_b=EXCLUDED.has_part_b,
+           status=EXCLUDED.status, synced_at=NOW()`,
+        [r.companyId, r.vchNo, r.vchType, r.date, r.partyGstin, r.irn,
+         r.ewayBillNo, r.ewayBillDate, r.documentType, r.validUpto, r.updatedDate,
+         r.transporterName, r.vehicleNumber, r.distanceKm, r.hasPartB, r.status]
+      );
+      upserted++;
+    }
+  });
+  return upserted;
+}
+
+/**
+ * Syncs e-way bill data — new module, sibling to syncVouchers but with its
+ * own leaner fetch (buildEwayBillRequest, no ledger/inventory entries) and
+ * its own independent completion tracking via sync_logs(data_type=
+ * 'eway_bills'), rather than reusing companies.initial_sync_done (that flag
+ * only tracks the main VOUCHER sync — reusing it here would mean e-way
+ * bills for a historical company that already finished its voucher backfill
+ * would never get a chance to run even once).
+ *
+ * A closed historical FY's e-way bills never change once fully backfilled —
+ * skipped on every run after the first successful one, same reasoning as
+ * runSyncCycle's historical-skip for vouchers/masters.
+ */
+async function syncEwayBills(company) {
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, is_historical } = company;
+  const t0 = Date.now();
+  logStep('EWAY BILLS', `start — company: "${company.name}"`);
+  await syncLogs.startSync(companyId, 'eway_bills');
+
+  try {
+    const lastSynced = await syncLogs.getLastSyncedDate(companyId, 'eway_bills');
+
+    if (is_historical && lastSynced) {
+      logStep('EWAY BILLS', '⏭  historical + already backfilled once — skipping');
+      await syncLogs.successSync(companyId, 'eway_bills', lastSynced, { fetched: 0, upserted: 0 });
+      return;
+    }
+
+    const toDate   = is_historical ? endOfFiscalYear(dbDateToIso(fiscal_year_from) || '2024-04-01') : todayIso();
+    const fromDate = lastSynced
+      ? subtractDays(lastSynced, config.sync.backfillDays)
+      : (dbDateToIso(fiscal_year_from) || '2024-04-01');
+
+    const chunks = buildDateChunks(fromDate, toDate);
+    logStep('EWAY BILLS', `${lastSynced ? 'INCREMENTAL' : 'FULL BACKFILL'} | chunked ${fromDate} → ${toDate} into ${chunks.length} chunk(s)`);
+
+    let totalFetched  = 0;
+    let totalUpserted = 0;
+    let anyChunkFailed = false;
+
+    for (let i = 0; i < chunks.length; i++) {
+      const { from: chunkFrom, to: chunkTo } = chunks[i];
+      const chunkLabel = `[${i + 1}/${chunks.length}] ${chunkFrom} → ${chunkTo}`;
+
+      try {
+        logStep('EWAY BILLS', `📡 ${chunkLabel} — sending to Tally...`);
+        const fetchStart = Date.now();
+        const xml = templates.buildEwayBillRequest(tallyName, chunkFrom, chunkTo);
+        const raw = await tallyClient.request(xml);
+        logStep('EWAY BILLS', `📥 ${chunkLabel} — got ${humanBytes(raw.length)} in ${humanMs(Date.now() - fetchStart)}`);
+
+        const parsed  = tallyClient.parseXml(raw);
+        const records = parsers.parseEwayBills(parsed, companyId);
+        logStep('EWAY BILLS', `✅ ${chunkLabel} — parsed ${records.length} e-way bills`);
+        totalFetched += records.length;
+
+        if (records.length > 0) {
+          const dbStart  = Date.now();
+          const upserted = await upsertEwayBillRecords(records);
+          totalUpserted += upserted;
+          logStep('EWAY BILLS', `💾 ${chunkLabel} — ${upserted}/${records.length} in DB (${humanMs(Date.now() - dbStart)})`);
+        }
+      } catch (chunkErr) {
+        anyChunkFailed = true;
+        logger.error(`[syncEngine] ❌ EWAY BILLS chunk FAILED ${chunkLabel} "${company.name}": ${chunkErr.message}`);
+      }
+    }
+
+    await syncLogs.successSync(companyId, 'eway_bills', todayIso(), { fetched: totalFetched, upserted: totalUpserted });
+    logStep(
+      anyChunkFailed ? 'EWAY BILLS ⚠️' : 'EWAY BILLS ✅',
+      `${totalUpserted}/${totalFetched} in DB across ${chunks.length} chunk(s)` +
+        (anyChunkFailed ? ' — some chunks failed, will retry next cycle' : '') +
+        ` | total: ${humanMs(Date.now() - t0)}`
+    );
+  } catch (err) {
+    await syncLogs.failSync(companyId, 'eway_bills', err.message);
+    logger.error(`[syncEngine] ❌ EWAY BILLS FAILED "${company.name}": ${err.message}`);
+  }
+}
+
 // ── Ledger Masters (STREAMING) ────────────────────────────────────────────────
 // Uses SAX streaming parser — never loads 55 MB into memory.
 // Shows real-time download + parse progress every 2 MB.
@@ -800,6 +912,13 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     await syncBillsReceivable(company);     // Customer bills + overdue (snapshot, no dates needed)
     await syncReceiptsAndPayments(company); // Cash Inflow/Outflow for the fiscal year
 
+    // e-Way bills has its OWN completion tracking (sync_logs, not
+    // companies.initial_sync_done — see syncEwayBills doc), so it belongs
+    // here in "always run" rather than gated behind the vouchers/masters
+    // historical-skip below: a historical company that already finished its
+    // voucher backfill still needs this to run at least once.
+    await syncEwayBills(company);           // e-Way bill compliance data (date-chunked, small)
+
     // ── Step B: Historical companies — skip heavy voucher/master sync ──────────
     if (company.is_historical && company.initial_sync_done) {
       logger.info(`[syncEngine]   ⏭  Historical + fully synced — skipping vouchers & masters`);
@@ -833,7 +952,7 @@ async function runSyncCycle({ includeMasters = false } = {}) {
 
 module.exports = {
   runSyncCycle,
-  syncVouchers, syncLedgers, syncStockItems,
+  syncVouchers, syncLedgers, syncStockItems, syncEwayBills,
   syncOutstanding, syncBillsPayable, syncBillsReceivable,
   syncReceiptsAndPayments, syncTrialBalance, syncProfitAndLoss,
 };

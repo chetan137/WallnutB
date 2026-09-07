@@ -384,6 +384,61 @@ function buildReceiptsAndPaymentsRequest(companyName, fromDate, toDate) {
 </ENVELOPE>`;
 }
 
+/**
+ * Fetch e-Way Bill compliance data for a date range via an ad-hoc TDL
+ * Collection — same technique proven for vouchers/stock items.
+ *
+ * Verified live (debug_eway_bill_2526.js): e-way bill data sits directly on
+ * the VOUCHER object — EWAYBILLDETAILS.LIST > BILLNUMBER/BILLDATE/VALIDUPTO/
+ * UPDATEDDATE/DOCUMENTTYPE, with TRANSPORTDETAILS.LIST > TRANSPORTERNAME/
+ * VEHICLENUMBER/ISPARTBUPDATED/DISTANCE nested one level deeper. PARTYGSTIN
+ * and IRN are cheap top-level scalar fields. Unlike Cost Centre (nested two
+ * levels inside ALLLEDGERENTRIES), fetching the bare EWAYBILLDETAILS.LIST
+ * here is cheap — verified ~4.2KB/voucher (12,705 bytes for 3 vouchers),
+ * nowhere near the bloat that made Cost Centre's ALLLEDGERENTRIES.LIST
+ * fetch heavy. Deliberately omits ALLLEDGERENTRIES/ALLINVENTORYENTRIES
+ * entirely — this module only needs e-way-bill fields, not line items.
+ *
+ * @param {string} companyName  Exact Tally company name
+ * @param {string} fromDate     ISO date "YYYY-MM-DD" — start of this chunk
+ * @param {string} toDate       ISO date "YYYY-MM-DD" — end of this chunk
+ * @returns {string}
+ */
+function buildEwayBillRequest(companyName, fromDate, toDate) {
+  const fromLiteral = isoToTallyLiteral(fromDate);
+  const toLiteral   = isoToTallyLiteral(toDate);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>EwayBillCollection</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="EwayBillCollection" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
+            <TYPE>Voucher</TYPE>
+            <FILTER>WallnutEwayBillDateFilter</FILTER>
+            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYGSTIN, IRN</FETCH>
+            <FETCH>EWAYBILLDETAILS.LIST</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formula" NAME="WallnutEwayBillDateFilter">$Date &gt;= $$Date:'${fromLiteral}' AND $Date &lt;= $$Date:'${toLiteral}'</SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+}
+
 module.exports = {
   buildAllVouchersRequest,
   buildLedgerMasterRequest,
@@ -394,4 +449,5 @@ module.exports = {
   buildProfitAndLossRequest,
   buildBillsReceivableRequest,
   buildReceiptsAndPaymentsRequest,
+  buildEwayBillRequest,
 };

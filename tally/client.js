@@ -22,6 +22,8 @@ const ALWAYS_ARRAY = new Set([
   'BILLALLOCATIONS.LIST',
   'CATEGORYALLOCATIONS.LIST', // Cost centre category wrapper, nested inside a ledger entry
   'COSTCENTREALLOCATIONS.LIST', // Cost centre allocation (real Sales Officer/Manager name) — nested inside CATEGORYALLOCATIONS.LIST
+  'EWAYBILLDETAILS.LIST',     // e-way bill data, nested directly inside a VOUCHER
+  'TRANSPORTDETAILS.LIST',    // Transporter/vehicle/Part-B status, nested inside EWAYBILLDETAILS.LIST
   'DSPACCNAME',               // Stock Summary display format
   'DSPSTKINFO',               // Stock Summary display format
 ]);
