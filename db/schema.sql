@@ -246,6 +246,36 @@ CREATE TABLE IF NOT EXISTS pl_items (
   UNIQUE (company_id, group_name, period_from, period_to)
 );
 
+-- ─── e-Way Bills ──────────────────────────────────────────────────────────────
+-- One row per voucher shown in Tally's GST Reports > Exchange Reports >
+-- e-Way Bill > "e-Way Bill - Voucher Register". Columns confirmed directly
+-- from real Tally screenshots (Date/Particulars/GSTIN/Vch Type/Vch No/
+-- Invoice Amount + Part B status) — eway_bill_no/eway_bill_date are
+-- nullable pending confirmation of whether Tally's XML API exposes the
+-- actual e-way bill number/date or only voucher-level generated/Part-B
+-- status (see debug_eway_bill_test.js).
+-- Replaced fully on each sync (status can change — e.g. "conflict with
+-- masters" resolving to "generated" — for the same voucher over time).
+CREATE TABLE IF NOT EXISTS eway_bills (
+  id              SERIAL PRIMARY KEY,
+  company_id      INT  NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  vch_no          TEXT NOT NULL,
+  vch_type        TEXT,
+  date            DATE NOT NULL,
+  party_name      TEXT,
+  party_gstin     TEXT,
+  invoice_amount  NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  eway_bill_no    TEXT,
+  eway_bill_date  DATE,
+  has_part_b      BOOLEAN NOT NULL DEFAULT FALSE,
+  status          TEXT,    -- e.g. 'generated' | 'conflict_with_masters'
+  synced_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, vch_no, vch_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_eway_bills_company_date
+  ON eway_bills (company_id, date DESC);
+
 -- ─── Indexes ─────────────────────────────────────────────────────────────────
 -- Optimized for the query patterns used by the AWS Express API.
 
