@@ -246,20 +246,23 @@ CREATE TABLE IF NOT EXISTS pl_items (
   UNIQUE (company_id, group_name, period_from, period_to)
 );
 
--- ─── e-Way Bills ──────────────────────────────────────────────────────────────
--- One row per voucher with real e-way bill data, from Tally's GST Reports >
--- Exchange Reports > e-Way Bill. Structure verified live (debug_eway_bill_
--- 2526.js): sits directly on the VOUCHER (not nested in ledger entries like
--- Cost Centre) as EWAYBILLDETAILS.LIST > BILLNUMBER/BILLDATE/VALIDUPTO/
+-- ─── e-Way Bills & e-Invoice ──────────────────────────────────────────────────
+-- One row per voucher with a real e-way bill and/or e-invoice (IRN), from
+-- Tally's GST Reports > Exchange Reports (e-Way Bill / e-Invoice). These are
+-- separate GST compliance requirements — a voucher can have an IRN with no
+-- e-way bill (e.g. a local sale below the distance threshold), so a row is
+-- stored whenever EITHER exists, distinguished by `status`.
+-- Structure verified live (debug_eway_bill_2526.js): PARTYGSTIN and IRN are
+-- cheap top-level scalar fields on the VOUCHER; e-way-bill-specific fields
+-- sit nested as EWAYBILLDETAILS.LIST > BILLNUMBER/BILLDATE/VALIDUPTO/
 -- UPDATEDDATE/DOCUMENTTYPE, with TRANSPORTDETAILS.LIST > TRANSPORTERNAME/
--- VEHICLENUMBER/ISPARTBUPDATED nested one level deeper; PARTYGSTIN and IRN
--- are cheap top-level scalar fields. No invoice_amount/party_name columns —
--- these vouchers already exist in the `vouchers` table from the regular
--- voucher sync, so the API layer joins on (company_id, vch_no, vch_type)
--- rather than duplicating that data here (this module only stores what's
--- NEW: e-way-bill-specific fields).
--- Replaced fully on each sync — status can change for the same voucher
--- over time (e.g. Part B gets updated after transport is arranged).
+-- VEHICLENUMBER/ISPARTBUPDATED nested one level deeper (all null when a row
+-- only has an e-invoice, no e-way bill). No invoice_amount/party_name
+-- columns — these vouchers already exist in the `vouchers` table from the
+-- regular voucher sync, so the API layer joins on (company_id, vch_no,
+-- vch_type) rather than duplicating that data here.
+-- Replaced fully on each sync — status can change for the same voucher over
+-- time (e.g. Part B gets updated after transport is arranged).
 CREATE TABLE IF NOT EXISTS eway_bills (
   id                SERIAL PRIMARY KEY,
   company_id        INT  NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -267,7 +270,7 @@ CREATE TABLE IF NOT EXISTS eway_bills (
   vch_type          TEXT,
   date              DATE NOT NULL,
   party_gstin       TEXT,
-  irn               TEXT,
+  irn               TEXT,             -- e-invoice reference number, if generated
   eway_bill_no      TEXT,             -- EWAYBILLDETAILS.LIST > BILLNUMBER
   eway_bill_date    DATE,             -- EWAYBILLDETAILS.LIST > BILLDATE
   document_type     TEXT,             -- e.g. "Tax Invoice"
@@ -277,7 +280,7 @@ CREATE TABLE IF NOT EXISTS eway_bills (
   vehicle_number    TEXT,             -- TRANSPORTDETAILS.LIST > VEHICLENUMBER
   distance_km       NUMERIC(10, 2),   -- TRANSPORTDETAILS.LIST > DISTANCE
   has_part_b        BOOLEAN NOT NULL DEFAULT FALSE,  -- TRANSPORTDETAILS.LIST > ISPARTBUPDATED
-  status            TEXT,    -- 'generated' — only rows with a real eway_bill_no are stored for now
+  status            TEXT,    -- 'generated' (has e-way bill) | 'einvoice_only' (IRN, no e-way bill)
   synced_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (company_id, vch_no, vch_type)
 );

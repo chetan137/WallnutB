@@ -390,10 +390,14 @@ function parseVouchers(parsed, companyId) {
  *   VOUCHER > EWAYBILLDETAILS.LIST > TRANSPORTDETAILS.LIST >
  *             TRANSPORTERNAME, VEHICLENUMBER, ISPARTBUPDATED, DISTANCE
  *
- * Only vouchers with a real BILLNUMBER are returned — a Sales voucher with
- * no e-way bill generated (or the rarer "conflict with masters" case seen in
- * Tally's own report) simply has no EWAYBILLDETAILS.LIST content and is
- * skipped, not stored as an empty/placeholder row.
+ * Returns a row whenever EITHER a real e-way bill (BILLNUMBER) OR a real
+ * e-invoice (top-level IRN) exists — these are separate GST compliance
+ * requirements (e.g. a local sale below the e-way-bill distance threshold
+ * can still need e-invoicing, and vice versa isn't possible but a voucher
+ * can have one without the other), so filtering on e-way-bill presence
+ * alone would silently drop e-invoice-only vouchers. A voucher with
+ * neither (or the rarer "conflict with masters" case seen in Tally's own
+ * report) is skipped — not stored as an empty/placeholder row.
  *
  * @param {Object} parsed     fast-xml-parser output
  * @param {number} companyId  FK for companies.id
@@ -407,17 +411,20 @@ function parseEwayBills(parsed, companyId) {
 
     vouchers.forEach((v, idx) => {
       try {
+        const irn = safeStr(v.IRN);
         const ewayBillDetails = ensureArray(v['EWAYBILLDETAILS.LIST'])[0];
-        if (!ewayBillDetails || typeof ewayBillDetails !== 'object') return;
+        const hasEwayBillDetails = ewayBillDetails && typeof ewayBillDetails === 'object';
+        const ewayBillNo = hasEwayBillDetails ? safeStr(ewayBillDetails.BILLNUMBER) : '';
 
-        const ewayBillNo = safeStr(ewayBillDetails.BILLNUMBER);
-        if (!ewayBillNo) return; // No real e-way bill on this voucher — skip.
+        if (!irn && !ewayBillNo) return; // Neither compliance doc exists — skip.
 
         const date  = tallyToIso(safeStr(v.DATE));
         const vchNo = safeStr(v.VOUCHERNUMBER);
         if (!date || !vchNo) return;
 
-        const transportDetails = ensureArray(ewayBillDetails['TRANSPORTDETAILS.LIST'])[0] || {};
+        const transportDetails = hasEwayBillDetails
+          ? (ensureArray(ewayBillDetails['TRANSPORTDETAILS.LIST'])[0] || {})
+          : {};
 
         records.push({
           companyId,
@@ -425,17 +432,17 @@ function parseEwayBills(parsed, companyId) {
           vchType:         safeStr(v.VOUCHERTYPENAME),
           date,
           partyGstin:      safeStr(v.PARTYGSTIN),
-          irn:             safeStr(v.IRN),
+          irn,
           ewayBillNo,
-          ewayBillDate:    tallyToIso(safeStr(ewayBillDetails.BILLDATE)),
-          documentType:    safeStr(ewayBillDetails.DOCUMENTTYPE),
-          validUpto:       tallyDateTimeToIso(safeStr(ewayBillDetails.VALIDUPTO)),
-          updatedDate:     tallyDateTimeToIso(safeStr(ewayBillDetails.UPDATEDDATE)),
+          ewayBillDate:    hasEwayBillDetails ? tallyToIso(safeStr(ewayBillDetails.BILLDATE)) : null,
+          documentType:    hasEwayBillDetails ? safeStr(ewayBillDetails.DOCUMENTTYPE) : '',
+          validUpto:       hasEwayBillDetails ? tallyDateTimeToIso(safeStr(ewayBillDetails.VALIDUPTO)) : null,
+          updatedDate:     hasEwayBillDetails ? tallyDateTimeToIso(safeStr(ewayBillDetails.UPDATEDDATE)) : null,
           transporterName: safeStr(transportDetails.TRANSPORTERNAME),
           vehicleNumber:   safeStr(transportDetails.VEHICLENUMBER),
           distanceKm:      safeNum(transportDetails.DISTANCE),
           hasPartB:        safeStr(transportDetails.ISPARTBUPDATED).toLowerCase() === 'yes',
-          status:          'generated',
+          status:          ewayBillNo ? 'generated' : 'einvoice_only',
         });
       } catch (innerErr) {
         logger.warn(`[parsers] Skipped e-way bill voucher idx=${idx}: ${innerErr.message}`);
