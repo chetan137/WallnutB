@@ -159,20 +159,47 @@ function looksLikeSalesPerson(name) {
 }
 
 /**
+ * A single ledger entry's own CATEGORYALLOCATIONS.LIST (if any) plus every
+ * CATEGORYALLOCATIONS.LIST nested inside its INVENTORYALLOCATIONS.LIST
+ * entries (if any) — see findSalesOfficerFromCostCentres for why both
+ * places matter.
+ * @param {Object} ledgerEntry
+ * @returns {Array}
+ */
+function allCategoryAllocationsOf(ledgerEntry) {
+  const direct = ensureArray(ledgerEntry['CATEGORYALLOCATIONS.LIST']);
+  const perItem = ensureArray(ledgerEntry['INVENTORYALLOCATIONS.LIST'])
+    .flatMap((inv) => ensureArray(inv?.['CATEGORYALLOCATIONS.LIST']));
+  return [...direct, ...perItem];
+}
+
+/**
  * Finds the real Sales Officer/Manager name for one voucher from its ledger
- * entries' cost centre allocations. Real structure (verified live):
+ * entries' cost centre allocations.
+ *
+ * BUG FIX: real structure varies by invoice shape (verified live via two
+ * different real vouchers) — on a single-item invoice the allocation sits
+ * directly on the ledger entry:
  *   ALLLEDGERENTRIES.LIST > CATEGORYALLOCATIONS.LIST > COSTCENTREALLOCATIONS.LIST > NAME
- * Takes the first person-like name found across every ledger entry — a
- * voucher may have several ledger lines (party, income, tax, round-off) but
- * only the income line typically carries a person cost centre.
+ * but on a MULTI-item invoice, Tally breaks the income ledger's amount down
+ * per stock item (INVENTORYALLOCATIONS.LIST, one entry per item under that
+ * ledger line), and the allocation sits one level deeper, inside THAT:
+ *   ALLLEDGERENTRIES.LIST > INVENTORYALLOCATIONS.LIST > CATEGORYALLOCATIONS.LIST > ...
+ * Only checking the first shape meant every multi-item Sales voucher (the
+ * common case) never matched, even after fixing the earlier honorific-
+ * prefix bug — checks both shapes now.
+ *
+ * Takes the first person-like name found across every ledger entry (and
+ * every item under it) — a voucher may have several ledger lines (party,
+ * income, tax, round-off) but only the income line(s) typically carry a
+ * person cost centre.
  * @param {Array} ledgerLines  Raw ALLLEDGERENTRIES.LIST / LEDGERENTRIES.LIST array
  * @returns {string}
  */
 function findSalesOfficerFromCostCentres(ledgerLines) {
   for (const l of ledgerLines) {
     if (typeof l !== 'object' || l === null) continue;
-    const categoryAllocs = ensureArray(l['CATEGORYALLOCATIONS.LIST']);
-    for (const cat of categoryAllocs) {
+    for (const cat of allCategoryAllocationsOf(l)) {
       const costCentreAllocs = ensureArray(cat?.['COSTCENTREALLOCATIONS.LIST']);
       for (const cc of costCentreAllocs) {
         const name = safeStr(cc?.NAME);
