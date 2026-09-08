@@ -14,9 +14,12 @@
  *   (b) it IS coming back in the raw XML, but parseVouchers isn't
  *       extracting it correctly in this real path.
  *
+ * v2 — only tests "Wallnut 25-26" directly (not looped with 24-25). Only
+ * one Tally company is reachable at a time, and 25-26 is the one with real
+ * vouchers in the last 7 days — testing 24-25 in the same run just wastes
+ * output on a guaranteed-0 result (its real data ends March 2025).
+ *
  * Run: node debug_verify_sales_officer.js
- * (Whichever company Tally currently has connected/focused will produce
- * real results; the other will just show 0 vouchers, same as always.)
  */
 
 require('dotenv').config();
@@ -26,7 +29,9 @@ const parsers     = require('./tally/parsers');
 const config      = require('./config');
 const { todayIso, subtractDays } = require('./utils/helpers');
 
-async function tryCompany(co) {
+const co = config.companies.find((c) => !c.isHistorical) || config.companies[0];
+
+async function tryCompany() {
   console.log(`\n=== Company: ${co.name} (Tally: "${co.tallyName}") ===`);
 
   const toDate = todayIso();
@@ -84,9 +89,7 @@ async function tryCompany(co) {
 }
 
 async function main() {
-  for (const co of config.companies) {
-    await tryCompany(co).catch((err) => console.error(`  ERROR for ${co.name}: ${err.message}`));
-  }
+  await tryCompany().catch((err) => console.error(`  ERROR for ${co.name}: ${err.message}`));
 }
 
 main().catch((err) => {
