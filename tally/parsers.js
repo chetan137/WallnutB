@@ -133,17 +133,29 @@ function parseRateString(raw) {
  * on real vouchers (verified live via debug_cost_centre_test.js — e.g.
  * "Mr. Kamlesh Dave", "Mr. Hemant Jain", "Mr. Vaibhav Pawar" against real
  * Sales vouchers), but the SAME mechanism is also used for non-person
- * allocations that would be wrong to store as a salesperson — confirmed live:
- * "Account" and "Branch Transfer - Sales" showed up as cost centre names on
- * some entries. Every real salesperson name seen so far carries an honorific
- * prefix; this is a conservative filter, not an exhaustive roster — a real
- * salesperson whose Tally cost centre name has no prefix would be missed
- * (left blank) rather than risk mislabeling a non-person allocation.
+ * allocations that would be wrong to store as a salesperson — confirmed
+ * live: "Account" and "Branch Transfer - Sales" showed up as cost centre
+ * names on some entries.
+ *
+ * BUG FIX: this originally REQUIRED an honorific prefix (Mr./Mrs./etc.) to
+ * accept a name as a real person, based on the March-2025 data where every
+ * real name carried one. Verified live (debug_verify_sales_officer.js)
+ * that sales_officer stayed 0% populated in production for weeks because
+ * of this — the SAME real people ("Kamlesh Dave", "Vaibhav Pawar") show up
+ * in the underlying Tally cost centre master WITHOUT the "Mr." prefix now,
+ * so the allowlist rejected every real officer name it was ever given.
+ * Inverted to a small, evidence-based blocklist of the two confirmed
+ * non-person names instead — matches real names with or without an
+ * honorific, only the specific generic categories actually observed are
+ * excluded (extend this set if another shows up, rather than tightening
+ * back to a fragile allowlist).
  * @param {string} name
  * @returns {boolean}
  */
+const NON_PERSON_COST_CENTRES = new Set(['account', 'branch transfer - sales']);
+
 function looksLikeSalesPerson(name) {
-  return /^(Mr|Mrs|Ms|Miss|Shri|Smt)\.?\s+\S/i.test(name);
+  return name.length > 0 && !NON_PERSON_COST_CENTRES.has(name.trim().toLowerCase());
 }
 
 /**
