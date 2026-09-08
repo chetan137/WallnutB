@@ -85,6 +85,10 @@ const { escapeXml, isoToTally, isoToTallyLiteral } = require('../utils/helpers')
  * date-chunking (small chunks keep the per-request voucher count, and
  * therefore the bloat, bounded — same mitigation BUG FIX 3 relies on).
  *
+ * ALLINVENTORYENTRIES.GSTHSNNAME: HSN code per item, for GSTR-1 HSN
+ * Summary reporting — a plain scalar field directly on the inventory
+ * entry, same cheap one-level shape as GODOWNNAME (no bloat risk).
+ *
  * @param {string} companyName  Exact Tally company name
  * @param {string} fromDate     ISO date "YYYY-MM-DD" — start of this chunk
  * @param {string} toDate       ISO date "YYYY-MM-DD" — end of this chunk
@@ -114,7 +118,7 @@ function buildAllVouchersRequest(companyName, fromDate, toDate) {
             <FILTER>WallnutDateFilter</FILTER>
             <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, NARRATION</FETCH>
             <FETCH>ALLLEDGERENTRIES.LIST</FETCH>
-            <FETCH>ALLINVENTORYENTRIES.STOCKITEMNAME, ALLINVENTORYENTRIES.ACTUALQTY, ALLINVENTORYENTRIES.BILLEDQTY, ALLINVENTORYENTRIES.RATE, ALLINVENTORYENTRIES.AMOUNT, ALLINVENTORYENTRIES.GODOWNNAME</FETCH>
+            <FETCH>ALLINVENTORYENTRIES.STOCKITEMNAME, ALLINVENTORYENTRIES.ACTUALQTY, ALLINVENTORYENTRIES.BILLEDQTY, ALLINVENTORYENTRIES.RATE, ALLINVENTORYENTRIES.AMOUNT, ALLINVENTORYENTRIES.GODOWNNAME, ALLINVENTORYENTRIES.GSTHSNNAME</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
         <TDLMESSAGE>

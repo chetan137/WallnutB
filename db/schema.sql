@@ -96,8 +96,10 @@ CREATE TABLE IF NOT EXISTS voucher_ledger_entries (
 
 -- ─── Voucher Inventory Entries ────────────────────────────────────────────────
 -- The stock item lines within sales/purchase vouchers.
--- Narration-parsed fields (sales_officer, area_city, state) are stored here
--- because Tally embeds them in the narration string, not in structured XML.
+-- sales_officer comes from the ledger entry's Cost Centre allocation (see
+-- tally/parsers.js findSalesOfficerFromCostCentres) — area_city/state are
+-- parsed from NARRATION and may be empty for companies with a different
+-- narration format.
 CREATE TABLE IF NOT EXISTS voucher_inventory_entries (
   id            SERIAL PRIMARY KEY,
   voucher_id    INT  NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE,
@@ -106,12 +108,19 @@ CREATE TABLE IF NOT EXISTS voucher_inventory_entries (
   unit          TEXT,
   rate          NUMERIC(15, 2),
   amount        NUMERIC(15, 2),
-  -- Parsed from NARRATION — may be empty for companies with different narration format
   sales_officer TEXT,
   area_city     TEXT,
   state         TEXT,
+  hsn_code      TEXT,    -- ALLINVENTORYENTRIES.GSTHSNNAME — for GSTR-1 HSN Summary reporting
   synced_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- CREATE TABLE IF NOT EXISTS above is a no-op on a table that already
+-- exists (true here — voucher_inventory_entries has existed since the
+-- first-ever sync), so a new column needs its own explicit statement to
+-- actually reach the live database. ADD COLUMN IF NOT EXISTS keeps this
+-- idempotent/safe to run on every startup like everything else here.
+ALTER TABLE voucher_inventory_entries ADD COLUMN IF NOT EXISTS hsn_code TEXT;
 
 -- ─── Outstanding Receivables ──────────────────────────────────────────────────
 -- Snapshot of party-wise outstanding as of last sync.

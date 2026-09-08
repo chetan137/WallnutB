@@ -350,6 +350,7 @@ function parseVouchers(parsed, companyId) {
           // "Vadodara Plant", "Bhiwandi Godown") — the closest real
           // geography dimension available, used here as a stand-in.
           const godown = safeStr(inv.GODOWNNAME);
+          const hsnCode = safeStr(inv.GSTHSNNAME);
 
           inventoryEntries.push({
             itemName:     invItemName,
@@ -360,6 +361,7 @@ function parseVouchers(parsed, companyId) {
             salesOfficer: costCentreSalesOfficer || narParsed.salesOfficer,
             areaCity:     godown || narParsed.areaCity,
             state:        narParsed.state,
+            hsnCode,
           });
         }
 
@@ -385,6 +387,7 @@ function parseVouchers(parsed, companyId) {
             salesOfficer: costCentreSalesOfficer || narParsed.salesOfficer,
             areaCity:     narParsed.areaCity,
             state:        narParsed.state,
+            hsnCode:      '', // Narration-derived fallback never has a real HSN code
           });
         }
 

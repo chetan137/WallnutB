@@ -225,10 +225,10 @@ async function upsertVoucherRecords(records) {
       }
       for (const ie of r.inventoryEntries) {
         await client.query(
-          `INSERT INTO voucher_inventory_entries (voucher_id,item_name,quantity,unit,rate,amount,sales_officer,area_city,state)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          `INSERT INTO voucher_inventory_entries (voucher_id,item_name,quantity,unit,rate,amount,sales_officer,area_city,state,hsn_code)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
           [voucherId, ie.itemName, ie.quantity, ie.unit, ie.rate, ie.amount,
-           ie.salesOfficer, ie.areaCity, ie.state]
+           ie.salesOfficer, ie.areaCity, ie.state, ie.hsnCode]
         );
       }
       upserted++;
