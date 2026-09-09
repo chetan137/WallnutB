@@ -20,9 +20,10 @@ const ALWAYS_ARRAY = new Set([
   'ALLLEDGERENTRIES.LIST',    // Kept for compatibility with older Tally versions
   'ALLINVENTORYENTRIES.LIST',
   'BILLALLOCATIONS.LIST',
-  'CATEGORYALLOCATIONS.LIST', // Cost centre category wrapper — nested inside a ledger entry directly (single-item invoice) OR inside INVENTORYALLOCATIONS.LIST (multi-item invoice)
+  'CATEGORYALLOCATIONS.LIST', // Cost centre category wrapper — nested inside a ledger entry directly, inside INVENTORYALLOCATIONS.LIST, OR (the REAL common case — see BUG FIX 6 in xmlTemplates.js) inside an inventory entry's own ACCOUNTINGALLOCATIONS.LIST
   'COSTCENTREALLOCATIONS.LIST', // Cost centre allocation (real Sales Officer/Manager name) — nested inside CATEGORYALLOCATIONS.LIST
-  'INVENTORYALLOCATIONS.LIST', // Per-stock-item breakdown of a ledger entry's amount on a multi-item invoice — cost centre allocation lives here, not on the ledger entry, when a voucher has more than one item
+  'INVENTORYALLOCATIONS.LIST', // Per-stock-item breakdown of a ledger entry's amount on a multi-item invoice — checked as a fallback shape, see ACCOUNTINGALLOCATIONS.LIST for the shape verified live
+  'ACCOUNTINGALLOCATIONS.LIST', // Nested inside ALLINVENTORYENTRIES.LIST — each stock item line's own ledger posting (e.g. "Net Sales GST 18%"); Cost Centre allocation lives HERE per real Tally data, per item, not on ALLLEDGERENTRIES.LIST
   'EWAYBILLDETAILS.LIST',     // e-way bill data, nested directly inside a VOUCHER
   'TRANSPORTDETAILS.LIST',    // Transporter/vehicle/Part-B status, nested inside EWAYBILLDETAILS.LIST
   'DSPACCNAME',               // Stock Summary display format

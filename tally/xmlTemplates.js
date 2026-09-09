@@ -89,6 +89,20 @@ const { escapeXml, isoToTally, isoToTallyLiteral } = require('../utils/helpers')
  * Summary reporting — a plain scalar field directly on the inventory
  * entry, same cheap one-level shape as GODOWNNAME (no bloat risk).
  *
+ * BUG FIX 6: the real Cost Centre location is NOT under ALLLEDGERENTRIES at
+ * all — verified live (debug_verify_sales_officer3.js against real
+ * WBSIMK-350/26-27) it sits per stock item, under
+ * ALLINVENTORYENTRIES.LIST > ACCOUNTINGALLOCATIONS.LIST >
+ * CATEGORYALLOCATIONS.LIST > COSTCENTREALLOCATIONS.LIST > NAME. The earlier
+ * "trimmed" dot-notation FETCH for ALLINVENTORYENTRIES (listed above) turns
+ * out not to actually trim it once ALLLEDGERENTRIES.LIST is bare-fetched in
+ * the same request — the raw response carries ALLINVENTORYENTRIES.LIST's
+ * FULL native shape anyway (confirmed live: ACCOUNTINGALLOCATIONS.LIST,
+ * BATCHALLOCATIONS.LIST, RATEDETAILS.LIST etc. all present despite only 7
+ * fields being dot-requested), which is exactly what parsers.js now reads
+ * Cost Centre from — no template change needed, only the parser was blind
+ * to data it was already receiving.
+ *
  * @param {string} companyName  Exact Tally company name
  * @param {string} fromDate     ISO date "YYYY-MM-DD" — start of this chunk
  * @param {string} toDate       ISO date "YYYY-MM-DD" — end of this chunk

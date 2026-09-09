@@ -159,10 +159,29 @@ function looksLikeSalesPerson(name) {
 }
 
 /**
+ * Scans a list of CATEGORYALLOCATIONS.LIST entries for the first real
+ * person-like Cost Centre name.
+ * @param {Array} categoryAllocations
+ * @returns {string}
+ */
+function firstSalesPersonFromCategoryAllocations(categoryAllocations) {
+  for (const cat of ensureArray(categoryAllocations)) {
+    const costCentreAllocs = ensureArray(cat?.['COSTCENTREALLOCATIONS.LIST']);
+    for (const cc of costCentreAllocs) {
+      const name = safeStr(cc?.NAME);
+      if (name && looksLikeSalesPerson(name)) return name;
+    }
+  }
+  return '';
+}
+
+/**
  * A single ledger entry's own CATEGORYALLOCATIONS.LIST (if any) plus every
  * CATEGORYALLOCATIONS.LIST nested inside its INVENTORYALLOCATIONS.LIST
- * entries (if any) — see findSalesOfficerFromCostCentres for why both
- * places matter.
+ * entries (if any) — kept as a fallback shape alongside the per-item
+ * ACCOUNTINGALLOCATIONS.LIST check in findSalesOfficerFromInventoryEntry,
+ * which is where real data actually carries the Cost Centre (see BUG FIX 6
+ * in xmlTemplates.js).
  * @param {Object} ledgerEntry
  * @returns {Array}
  */
@@ -175,19 +194,11 @@ function allCategoryAllocationsOf(ledgerEntry) {
 
 /**
  * Finds the real Sales Officer/Manager name for one voucher from its ledger
- * entries' cost centre allocations.
- *
- * BUG FIX: real structure varies by invoice shape (verified live via two
- * different real vouchers) — on a single-item invoice the allocation sits
- * directly on the ledger entry:
- *   ALLLEDGERENTRIES.LIST > CATEGORYALLOCATIONS.LIST > COSTCENTREALLOCATIONS.LIST > NAME
- * but on a MULTI-item invoice, Tally breaks the income ledger's amount down
- * per stock item (INVENTORYALLOCATIONS.LIST, one entry per item under that
- * ledger line), and the allocation sits one level deeper, inside THAT:
- *   ALLLEDGERENTRIES.LIST > INVENTORYALLOCATIONS.LIST > CATEGORYALLOCATIONS.LIST > ...
- * Only checking the first shape meant every multi-item Sales voucher (the
- * common case) never matched, even after fixing the earlier honorific-
- * prefix bug — checks both shapes now.
+ * entries' cost centre allocations. FALLBACK ONLY — see
+ * findSalesOfficerFromInventoryEntry for the shape real Sales vouchers
+ * actually use. Kept for voucher types with no real inventory line (e.g. a
+ * Journal/Receipt that still carries a Cost Centre directly on its ledger
+ * entries).
  *
  * Takes the first person-like name found across every ledger entry (and
  * every item under it) — a voucher may have several ledger lines (party,
@@ -199,15 +210,33 @@ function allCategoryAllocationsOf(ledgerEntry) {
 function findSalesOfficerFromCostCentres(ledgerLines) {
   for (const l of ledgerLines) {
     if (typeof l !== 'object' || l === null) continue;
-    for (const cat of allCategoryAllocationsOf(l)) {
-      const costCentreAllocs = ensureArray(cat?.['COSTCENTREALLOCATIONS.LIST']);
-      for (const cc of costCentreAllocs) {
-        const name = safeStr(cc?.NAME);
-        if (name && looksLikeSalesPerson(name)) return name;
-      }
-    }
+    const name = firstSalesPersonFromCategoryAllocations(allCategoryAllocationsOf(l));
+    if (name) return name;
   }
   return '';
+}
+
+/**
+ * Finds the real Sales Officer/Manager name for ONE stock item line.
+ *
+ * BUG FIX: verified live (debug_verify_sales_officer3.js against real
+ * WBSIMK-350/26-27) that the Cost Centre allocation for a real multi-item
+ * Sales invoice does NOT sit anywhere under ALLLEDGERENTRIES.LIST (the
+ * earlier INVENTORYALLOCATIONS.LIST fix targeted the wrong tree — an easy
+ * name mix-up between the two similarly-named lists) — it sits inside each
+ * stock item's OWN ledger posting, one level under ALLINVENTORYENTRIES.LIST:
+ *   ALLINVENTORYENTRIES.LIST > ACCOUNTINGALLOCATIONS.LIST >
+ *     CATEGORYALLOCATIONS.LIST > COSTCENTREALLOCATIONS.LIST > NAME
+ * This also means Cost Centre is genuinely PER ITEM in Tally's data model
+ * (different items on the same invoice can carry different Cost Centres) —
+ * computed per inventory line here rather than once per voucher.
+ * @param {Object} inv  Raw ALLINVENTORYENTRIES.LIST entry
+ * @returns {string}
+ */
+function findSalesOfficerFromInventoryEntry(inv) {
+  const categoryAllocations = ensureArray(inv?.['ACCOUNTINGALLOCATIONS.LIST'])
+    .flatMap((acc) => ensureArray(acc?.['CATEGORYALLOCATIONS.LIST']));
+  return firstSalesPersonFromCategoryAllocations(categoryAllocations);
 }
 
 // ── Narration parser ────────────────────────────────────────────────────────────
@@ -351,6 +380,12 @@ function parseVouchers(parsed, companyId) {
           // geography dimension available, used here as a stand-in.
           const godown = safeStr(inv.GODOWNNAME);
           const hsnCode = safeStr(inv.GSTHSNNAME);
+          // Per-item Cost Centre (see findSalesOfficerFromInventoryEntry doc)
+          // takes priority — it's the shape real Sales invoices actually use
+          // and can differ per item on the same invoice. Falls back to the
+          // voucher-wide ledger-entry check, then narration, for voucher
+          // shapes that don't carry it per item.
+          const itemSalesOfficer = findSalesOfficerFromInventoryEntry(inv);
 
           inventoryEntries.push({
             itemName:     invItemName,
@@ -358,7 +393,7 @@ function parseVouchers(parsed, companyId) {
             unit:         qtyParsed.unit,
             rate:         invRate,
             amount:       invAmount || totalAmount,
-            salesOfficer: costCentreSalesOfficer || narParsed.salesOfficer,
+            salesOfficer: itemSalesOfficer || costCentreSalesOfficer || narParsed.salesOfficer,
             areaCity:     godown || narParsed.areaCity,
             state:        narParsed.state,
             hsnCode,
