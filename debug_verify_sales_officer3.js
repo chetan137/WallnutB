@@ -2,77 +2,98 @@
 /**
  * debug_verify_sales_officer3.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Run this ONLY while Tally currently has "Wallnut 25-26" connected/focused —
- * only one company is reachable at a time, and the target vouchers below
- * belong to this company specifically.
+ * Run this ONLY while Tally currently has the TARGET company connected/focused
+ * — only one company is reachable at a time (see "bhai ek time ek company
+ * possible" — never loop both in one script).
  *
  * sales_officer is STILL showing 0% populated in the DB even for real Sales
  * vouchers synced by the latest code (confirmed via hsn_code being present
- * on the same rows, which only the newest deploy can write). This script
- * dumps the FULL raw XML for a few real, recent Sales vouchers using the
- * EXACT same production fetch shape (bare ALLLEDGERENTRIES.LIST) to see
- * whether Cost Centre data genuinely exists in Tally for them at all, and
- * if so, in what exact shape — the earlier fix only covers two known
- * shapes (direct on ledger entry, or nested one level inside
- * INVENTORYALLOCATIONS.LIST).
+ * on the same rows, which only the newest deploy can write). This runs the
+ * EXACT same production fetch + parser (buildAllVouchersRequest +
+ * parseVouchers) against a real date window and prints what sales_officer
+ * comes out as per voucher — so it works for ANY year/company, not just one
+ * hardcoded set of voucher numbers.
  *
- * Run: node debug_verify_sales_officer3.js
+ * Usage:
+ *   node debug_verify_sales_officer3.js [companyNameContains] [fromDate] [toDate]
+ *
+ *   companyNameContains  substring match against configured company name/
+ *                        tallyName, e.g. "25-26" or "24-25" (case-insensitive).
+ *                        Defaults to the non-historical (current) company.
+ *   fromDate / toDate    ISO "YYYY-MM-DD". Default: last 3 days through today.
+ *
+ * Examples:
+ *   node debug_verify_sales_officer3.js                     # current company, last 3 days
+ *   node debug_verify_sales_officer3.js 25-26                # company matching "25-26", last 3 days
+ *   node debug_verify_sales_officer3.js 25-26 2026-09-01 2026-09-08
  */
 
 require('dotenv').config();
 const tallyClient = require('./tally/client');
+const templates   = require('./tally/xmlTemplates');
+const parsers     = require('./tally/parsers');
 const config      = require('./config');
-const { escapeXml, isoToTallyLiteral } = require('./utils/helpers');
 
-const co = config.companies.find((c) => !c.isHistorical) || config.companies[0];
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+function subtractDaysIso(iso, days) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
 
-// Real, recent Sales vouchers confirmed in the DB with sales_officer = '' —
-// all synced by the latest (HSN-capable) code, so this checks the CURRENT
-// production fetch shape against real Tally data.
-const TARGET_VOUCHER_NUMBERS = ['WBSIMK-353/26-27', 'WBSIMK-350/26-27', 'WBSIGJ-090/26-27'];
+const [, , companyArg, fromArg, toArg] = process.argv;
+
+const company = companyArg
+  ? config.companies.find(
+      (c) => c.name.toLowerCase().includes(companyArg.toLowerCase()) ||
+             c.tallyName.toLowerCase().includes(companyArg.toLowerCase())
+    )
+  : config.companies.find((c) => !c.isHistorical) || config.companies[0];
+
+if (!company) {
+  console.error(`No configured company matches "${companyArg}". Configured companies:`);
+  config.companies.forEach((c) => console.error(`  - ${c.name} (Tally: "${c.tallyName}")`));
+  process.exit(1);
+}
+
+const toDate   = toArg   || todayIso();
+const fromDate = fromArg || subtractDaysIso(toDate, 3);
 
 async function main() {
-  console.log(`Company: ${co.name} (Tally: "${co.tallyName}")`);
+  console.log(`Company: ${company.name} (Tally: "${company.tallyName}")`);
+  console.log(`Window:  ${fromDate} → ${toDate}\n`);
 
-  const voucherClause = TARGET_VOUCHER_NUMBERS.map((vn) => `$VoucherNumber = "${vn}"`).join(' OR ');
-
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER>
-    <VERSION>1</VERSION>
-    <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Collection</TYPE>
-    <ID>SalesOfficerTest3</ID>
-  </HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVCURRENTCOMPANY>${escapeXml(co.tallyName)}</SVCURRENTCOMPANY>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="SalesOfficerTest3" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes">
-            <TYPE>Voucher</TYPE>
-            <FILTER>SalesOfficerTest3Filter</FILTER>
-            <FETCH>DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME</FETCH>
-            <FETCH>ALLLEDGERENTRIES.LIST</FETCH>
-          </COLLECTION>
-        </TDLMESSAGE>
-        <TDLMESSAGE>
-          <SYSTEM TYPE="Formula" NAME="SalesOfficerTest3Filter">${voucherClause}</SYSTEM>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
-
-  const t0 = Date.now();
+  const xml = templates.buildAllVouchersRequest(company.tallyName, fromDate, toDate);
+  const t0  = Date.now();
   const raw = await tallyClient.request(xml);
-  console.log(`→ ${raw.length} bytes in ${Date.now() - t0}ms`);
-  console.log('--- FULL raw response ---');
-  console.log(raw);
-  console.log('--- end raw response ---');
+  console.log(`Fetched ${raw.length} bytes in ${Date.now() - t0}ms`);
+
+  const parsed  = tallyClient.parseXml(raw);
+  const records = parsers.parseVouchers(parsed, company.id || 0);
+  const sales   = records.filter((r) => /^sales/i.test(r.vchType));
+
+  console.log(`\n${records.length} total vouchers parsed, ${sales.length} are Sales-type.\n`);
+
+  let anyOfficerFound = false;
+  for (const r of sales) {
+    const officers = [...new Set(r.inventoryEntries.map((ie) => ie.salesOfficer).filter(Boolean))];
+    if (officers.length) anyOfficerFound = true;
+    console.log(`${r.vchNo} | ${r.date} | party="${r.partyName}" | officer(s)="${officers.join(', ')}"`);
+  }
+
+  if (!anyOfficerFound && sales.length > 0) {
+    console.log('\n⚠ No sales_officer found on ANY Sales voucher in this window.');
+    console.log('Dumping FULL raw XML for the first Sales voucher for manual inspection:\n');
+    const firstVchNo = sales[0].vchNo;
+    // Extract just that voucher's block from the raw response for readability.
+    const idx = raw.indexOf(firstVchNo);
+    const start = raw.lastIndexOf('<VOUCHER', idx);
+    const end   = raw.indexOf('</VOUCHER>', idx) + '</VOUCHER>'.length;
+    console.log(start >= 0 && end > start ? raw.slice(start, end) : raw);
+  }
+
   console.log('\nPaste this ENTIRE output back.');
 }
 
