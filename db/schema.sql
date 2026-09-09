@@ -77,10 +77,23 @@ CREATE TABLE IF NOT EXISTS vouchers (
   narration    TEXT,
   total_amount NUMERIC(15, 2) NOT NULL DEFAULT 0,
   is_cancelled BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Agreed credit period for this bill (party ledger's BILLALLOCATIONS.LIST
+  -- > BILLCREDITPERIOD, e.g. "15 Days") — for the Credit Terms Compliance
+  -- report: how many days a customer was actually GIVEN vs. bills_receivable
+  -- .overdue_days (how many days late they actually are).
+  credit_period_label TEXT,
+  credit_period_days  INTEGER,
   synced_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   -- vch_no can repeat across different voucher types (e.g. Sales/001 and Receipt/001)
   UNIQUE (company_id, vch_no, vch_type)
 );
+
+-- CREATE TABLE IF NOT EXISTS above is a no-op on a table that already
+-- exists (true here — vouchers has existed since the first-ever sync), so
+-- new columns need their own explicit statement to actually reach the live
+-- database (same pattern as voucher_inventory_entries.hsn_code above).
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS credit_period_label TEXT;
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS credit_period_days  INTEGER;
 
 -- ─── Voucher Ledger Entries ────────────────────────────────────────────────────
 -- The debit/credit ledger lines within each voucher.

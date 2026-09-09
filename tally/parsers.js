@@ -239,6 +239,44 @@ function findSalesOfficerFromInventoryEntry(inv) {
   return firstSalesPersonFromCategoryAllocations(categoryAllocations);
 }
 
+// ── Credit Terms per Bill ────────────────────────────────────────────────────
+
+/**
+ * Extracts the agreed credit period for a bill from the party ledger
+ * entry's BILLALLOCATIONS.LIST.
+ *
+ * Verified live (debug_verify_sales_officer3.js against real
+ * WBSIMK-350/26-27): ALLLEDGERENTRIES.LIST (party line) >
+ * BILLALLOCATIONS.LIST > BILLCREDITPERIOD, e.g.
+ *   <BILLCREDITPERIOD TYPE="Due Date" JD="46271" P="15 Days">15 Days</BILLCREDITPERIOD>
+ * A cheap scalar already arriving in production (BILLALLOCATIONS.LIST is
+ * part of the bare ALLLEDGERENTRIES.LIST fetch used for Cost Centre) — no
+ * new FETCH needed. Not present on every bill (e.g. cash sales, journals),
+ * or shows as "&#4; Not Applicable" when Tally has no credit period set.
+ *
+ * Existing bills_receivable.overdue_days already tells you a bill is late,
+ * but not by how much relative to what was actually AGREED — this gives
+ * that context: "15 days terms, 45 days overdue" reads very differently
+ * from "60 days terms, 45 days overdue" even though both are overdue.
+ *
+ * @param {Array} ledgerLines  Raw ALLLEDGERENTRIES.LIST / LEDGERENTRIES.LIST array
+ * @returns {{ creditPeriodLabel: string, creditPeriodDays: number|null }}
+ */
+function findCreditPeriod(ledgerLines) {
+  for (const l of ledgerLines) {
+    if (typeof l !== 'object' || l === null) continue;
+    if (safeStr(l.ISPARTYLEDGER).toLowerCase() !== 'yes') continue;
+
+    for (const ba of ensureArray(l['BILLALLOCATIONS.LIST'])) {
+      const label = safeStr(ba?.BILLCREDITPERIOD);
+      if (!label || /not applicable/i.test(label)) continue;
+      const m = label.match(/(\d+)\s*Day/i);
+      return { creditPeriodLabel: label, creditPeriodDays: m ? parseInt(m[1], 10) : null };
+    }
+  }
+  return { creditPeriodLabel: '', creditPeriodDays: null };
+}
+
 // ── Narration parser ────────────────────────────────────────────────────────────
 
 /**
@@ -350,6 +388,9 @@ function parseVouchers(parsed, companyId) {
         // Real Sales Officer/Manager — see findSalesOfficerFromCostCentres doc.
         const costCentreSalesOfficer = findSalesOfficerFromCostCentres(ledgerLines);
 
+        // Agreed credit period for this bill — see findCreditPeriod doc.
+        const { creditPeriodLabel, creditPeriodDays } = findCreditPeriod(ledgerLines);
+
         // ── Extract inventory entries (ALLINVENTORYENTRIES.LIST) ──────────
         // Tally qty strings: "6000.000 Kgs =  300.000 Bags" → 300 Bags
         // Tally rate strings: "242.00/Bags" → 242
@@ -439,6 +480,8 @@ function parseVouchers(parsed, companyId) {
           totalAmount,
           ledgerEntries,
           inventoryEntries,
+          creditPeriodLabel,
+          creditPeriodDays,
         });
 
       } catch (innerErr) {
