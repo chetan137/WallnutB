@@ -41,6 +41,10 @@
  *   The voucher amount is spread over its item lines in proportion to each line's
  *   amount, so item / dealer / officer / state breakdowns still add up to it.
  *   Quantity of a net-negative voucher (a credit note) is negative.
+ *
+ * DEALER PLACE: state / district / city / pincode come from the dealer's ledger pincode
+ * (dealer_loc CTE), not from the plant. Rows of dealers without a mapped pincode keep the
+ * old state and have an empty district / city.
  */
 
 /**
@@ -51,7 +55,18 @@
  */
 function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
   return `
-    WITH voucher_ledger AS (
+    WITH dealer_loc AS (
+      -- Dealer's real place, from the pincode on the Tally ledger master (pincode_locations is
+      -- filled by tallybackend/sync_pincode_locations.js). One row per dealer name; the latest
+      -- company that has a pincode wins.
+      SELECT DISTINCT ON (l.name) l.name,
+             REGEXP_REPLACE(l.pincode, '[[:space:]]', '', 'g') AS pincode,
+             pl.state, pl.district, pl.city
+      FROM ledgers l
+      JOIN pincode_locations pl ON pl.pincode = REGEXP_REPLACE(l.pincode, '[[:space:]]', '', 'g')
+      ORDER BY l.name, l.company_id DESC
+    ),
+    voucher_ledger AS (
       SELECT e.voucher_id,
              SUM(e.amount) FILTER (WHERE l.parent_group = 'Sales Accounts')        AS sales_amt,
              SUM(e.amount) FILTER (WHERE l.parent_group ILIKE 'Branch Trf%Sales%') AS branch_amt
@@ -124,7 +139,12 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
       END                                              AS "amount",
       COALESCE(vie.sales_officer, '')                  AS "salesMan",
       COALESCE(vie.area_city, '')                      AS "areaCity",
-      COALESCE(NULLIF(vie.state, ''), l.state, '')     AS "state",
+      -- Dealer's place from the pincode first; the old plant / ledger state only when no pincode.
+      COALESCE(NULLIF(dl.state, ''), NULLIF(vie.state, ''), l.state, '') AS "state",
+      COALESCE(dl.district, '')                        AS "district",
+      COALESCE(dl.city, '')                            AS "city",
+      COALESCE(dl.pincode, '')                         AS "pincode",
+      TO_CHAR(br.due_date, 'YYYY-MM-DD')               AS "billDueDate",
       COALESCE(si.parent_group, '')                    AS "stockGroup",
       COALESCE(si.parent_group, '')                    AS "stockCategory",
       -- BUG FIX: bills_receivable is bill-level (one row per bill), but this
@@ -147,6 +167,7 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
       ON br.company_id = v.company_id AND br.party_name = v.party_name AND br.bill_ref = v.vch_no
     LEFT JOIN ledgers l
       ON l.company_id = v.company_id AND l.name = v.party_name
+    LEFT JOIN dealer_loc dl ON dl.name = v.party_name
     ORDER BY v.date DESC
   `;
 }
