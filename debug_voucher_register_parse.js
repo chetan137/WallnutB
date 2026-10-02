@@ -35,7 +35,13 @@ if (!co) {
   console.error(`No configured company matches "${companyArg}".`);
   process.exit(1);
 }
-const day = dayArg || '2026-09-02';
+const startDay = dayArg || '2026-09-02';
+
+function nextDay(iso) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
 
 function counts(arr) {
   const m = {};
@@ -45,13 +51,28 @@ function counts(arr) {
 
 async function main() {
   console.log('⚠️  tallybackend (pm2 tally-sync / node index.js) should be STOPPED right now.');
-  console.log(`Company: ${co.name} (Tally: "${co.tallyName}") | Day: ${day}\n`);
+  console.log(`Company: ${co.name} (Tally: "${co.tallyName}") | starting at day: ${startDay}`);
+  console.log('Tries one day at a time (up to 10 days) until a day with Sales vouchers is found.\n');
 
-  const t0  = Date.now();
-  const raw = await tallyClient.request(templates.buildVoucherRegisterRequest(co.tallyName, day, day));
-  console.log(`Response: ${(raw.length / 1024 / 1024).toFixed(2)} MB in ${Date.now() - t0}ms | <VOUCHER tags: ${(raw.match(/<VOUCHER[ >]/g) || []).length}`);
+  // One day at a time keeps every request small. Stops at the first day that
+  // actually has Sales/Credit-Note vouchers, so inventory lines / cost centres
+  // / sales officers can be checked too (a day with only journals proves little).
+  let day = startDay;
+  let raw = '';
+  let parsed = null;
+  for (let tries = 0; tries < 10; tries++) {
+    const t0 = Date.now();
+    raw = await tallyClient.request(templates.buildVoucherRegisterRequest(co.tallyName, day, day));
+    parsed = tallyClient.parseXml(raw);
+    const probe = parsers.parseVouchers(parsed, 0);
+    const salesCount = probe.filter((r) => /^sales|^credit note/i.test(r.vchType)).length;
+    console.log(`  ${day}: ${(raw.length / 1024 / 1024).toFixed(2)} MB in ${Date.now() - t0}ms | ${probe.length} vouchers | ${salesCount} sales/credit-note`);
+    if (salesCount > 0) break;
+    day = nextDay(day);
+  }
+  console.log(`\nAnalysing day: ${day}`);
+  console.log(`Response: ${(raw.length / 1024 / 1024).toFixed(2)} MB | <VOUCHER tags: ${(raw.match(/<VOUCHER[ >]/g) || []).length}`);
 
-  const parsed = tallyClient.parseXml(raw);
   const env  = parsed.ENVELOPE || {};
   const body = env.BODY || {};
   console.log('ENVELOPE keys:', Object.keys(env).join(', '));
