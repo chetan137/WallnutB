@@ -39,7 +39,7 @@ const write = (file, header, rows) => {
 (async () => {
   const { rows: perFy } = await pool.query(`
     WITH ${MERGED}
-    SELECT TO_CHAR(d.fy, 'YYYY') || '-' || TO_CHAR(d.fy + INTERVAL '1 year', 'YY') AS fy,
+    SELECT RIGHT(d.fy::text, 2) || '-' || RIGHT((d.fy + 1)::text, 2) AS fy,
            COUNT(*) AS dealers,
            COUNT(m.address) AS with_address, COUNT(m.pincode) AS with_pincode,
            COUNT(m.state)   AS with_state,   COUNT(m.gst_no)  AS with_gst_no
