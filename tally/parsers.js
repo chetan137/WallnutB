@@ -441,6 +441,40 @@ function parseVouchers(parsed, companyId) {
           });
         }
 
+        // ── Sales/purchase accounting ledger of each stock item line ───────
+        // The "Voucher Register" report (how the current company's vouchers
+        // are fetched — see buildVoucherRegisterRequest) returns each
+        // voucher's native object, where an item invoice's SALES ledger (e.g.
+        // "Net Sales GST 18%", "Oms Sales Gst 18%-Br") lives inside each
+        // inventory line's ACCOUNTINGALLOCATIONS.LIST — NOT among the
+        // voucher's own ledger entries, which only hold the party, GST and
+        // round-off lines (verified live: debug_voucher_register_parse_2526.js).
+        // The ad-hoc collection used for the historical company does list it
+        // as a ledger entry. Without it here, Branch Transfer / Sample
+        // invoices could not be recognised by their sales ledger, and sales
+        // ledgers' computed closing balances would miss these vouchers.
+        // Ledgers already present as ledger entries are skipped (no double
+        // counting); per-item allocations of the same ledger are summed.
+        const knownLedgerNames = new Set(ledgerEntries.map((l) => l.ledgerName.toLowerCase()));
+        const allocatedLedgers = new Map();
+        for (const inv of inventoryLines) {
+          if (typeof inv !== 'object' || inv === null) continue;
+          for (const alloc of ensureArray(inv['ACCOUNTINGALLOCATIONS.LIST'])) {
+            if (typeof alloc !== 'object' || alloc === null) continue;
+            const allocName = safeStr(alloc.LEDGERNAME);
+            if (!allocName || knownLedgerNames.has(allocName.toLowerCase())) continue;
+            const cur = allocatedLedgers.get(allocName) || {
+              ledgerName:       allocName,
+              amount:           0,
+              isParty:          false,
+              isDeemedPositive: safeStr(alloc.ISDEEMEDPOSITIVE).toLowerCase() === 'yes',
+            };
+            cur.amount += safeNum(alloc.AMOUNT);
+            allocatedLedgers.set(allocName, cur);
+          }
+        }
+        ledgerEntries.push(...allocatedLedgers.values());
+
         // ── Fallback: parse narration when no real inventory nodes exist ───
         // Only for voucher types that can genuinely carry inventory. Tally's
         // four purely-financial voucher types (Journal, Payment, Receipt,
