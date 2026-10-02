@@ -307,6 +307,11 @@ async function syncVouchers(company) {
     // The resume cursor may only advance over an unbroken run of finished
     // chunks — once one fails, later successes must not skip past it.
     let cursorOk = true;
+    // Tally refusing connections (closed, busy, wrong screen) makes EVERY chunk
+    // fail instantly — don't grind through hundreds of them, stop this cycle and
+    // let the next one resume from the cursor.
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 3;
 
     for (let i = 0; i < chunks.length; i++) {
       const { from: chunkFrom, to: chunkTo } = chunks[i];
@@ -344,10 +349,16 @@ async function syncVouchers(company) {
           logStep('VOUCHERS', `💾 ${chunkLabel} — ${upserted}/${records.length} in DB (${humanMs(Date.now() - dbStart)})`);
         }
         if (cursorOk && !initial_sync_done) await syncLogs.setBackfillCursor(companyId, chunkTo);
+        consecutiveFailures = 0;
       } catch (chunkErr) {
         anyChunkFailed = true;
         cursorOk = false;
-        logger.error(`[syncEngine] ❌ VOUCHERS chunk FAILED ${chunkLabel} "${company.name}": ${chunkErr.message}`);
+        consecutiveFailures += 1;
+        logger.error(`[syncEngine] ❌ VOUCHERS chunk FAILED ${chunkLabel} "${company.name}": ${chunkErr.code ? chunkErr.code + ' — ' : ''}${chunkErr.message}`);
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          logger.warn(`[syncEngine] ⚠️  VOUCHERS: ${consecutiveFailures} chunks failed in a row for "${company.name}" — Tally is not answering (closed? busy? showing a dialog? XML port?). Stopping this cycle; the next one resumes from the saved cursor.`);
+          break;
+        }
         // Keep going — a failed chunk shouldn't lose the chunks already fetched.
       }
     }
