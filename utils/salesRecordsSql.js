@@ -20,7 +20,10 @@
  * month higher (credit notes were added, not subtracted).
  *
  * Per voucher (Sales, Credit Note and Debit Note types — the only types that post to
- * these groups in this data):
+ * these groups in this data). "Sales Order…" types (Proforma Invoices, e.g. "Sales Order_Kol")
+ * are EXCLUDED even though their names start with "Sales": a Sales Order is a non-accounting
+ * document in Tally (no ledger posting, nothing in the P&L), but the Voucher Register still
+ * returns it with sales ledger lines — counted, they put Sep-2026 40 lakh above Tally:
  *
  *   category  branch_transfer  has a posting in a "Branch Trf…Sales" group ledger
  *             sample           voucher type "Promotional Invoice", or a free-goods
@@ -56,7 +59,7 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
       JOIN vouchers v ON v.id = e.voucher_id
       JOIN ledgers  l ON l.company_id = v.company_id AND l.name = e.ledger_name
       WHERE v.is_cancelled = false
-        AND (LOWER(v.vch_type) LIKE 'sales%' OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
+        AND ((LOWER(v.vch_type) LIKE 'sales%' AND LOWER(v.vch_type) NOT LIKE 'sales order%') OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
         ${companyFilter}
         ${dateFilter}
       GROUP BY e.voucher_id
@@ -91,7 +94,7 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
           FROM voucher_inventory_entries x WHERE x.voucher_id = v.id
         ) vi ON true
         WHERE v.is_cancelled = false
-          AND (LOWER(v.vch_type) LIKE 'sales%' OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
+          AND ((LOWER(v.vch_type) LIKE 'sales%' AND LOWER(v.vch_type) NOT LIKE 'sales order%') OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
           ${companyFilter}
           ${dateFilter}
       ) b
