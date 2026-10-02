@@ -22,6 +22,14 @@ const MERGED = `
     FROM ledgers l JOIN companies c ON c.id = l.company_id
     GROUP BY l.name
   ),
+  city AS (
+    SELECT party_name AS name, area_city AS city FROM (
+      SELECT v.party_name, x.area_city, ROW_NUMBER() OVER (PARTITION BY v.party_name ORDER BY COUNT(*) DESC, MAX(v.date) DESC) AS rn
+      FROM vouchers v JOIN voucher_inventory_entries x ON x.voucher_id = v.id
+      WHERE v.is_cancelled = false AND NULLIF(TRIM(x.area_city), '') IS NOT NULL
+      GROUP BY v.party_name, x.area_city
+    ) t WHERE rn = 1
+  ),
   dealer_fy AS (
     SELECT DISTINCT v.party_name AS name, fy_start(v.date) AS fy
     FROM vouchers v
@@ -50,11 +58,11 @@ const write = (file, header, rows) => {
 
   const { rows: all } = await pool.query(`
     WITH ${MERGED}
-    SELECT d.name, m.state, m.pincode, m.address, m.gst_no AS gstin
-    FROM (SELECT DISTINCT name FROM dealer_fy) d LEFT JOIN merged m ON m.name = d.name
+    SELECT d.name, c.city, m.state, m.pincode, m.address, m.gst_no AS gstin
+    FROM (SELECT DISTINCT name FROM dealer_fy) d LEFT JOIN merged m ON m.name = d.name LEFT JOIN city c ON c.name = d.name
     ORDER BY d.name`);
-  write('dealers_all.csv', ['name', 'state', 'pincode', 'address', 'gstin'], all);
-  write('dealers_no_pincode.csv', ['name', 'state', 'gstin'], all.filter((r) => !r.pincode));
+  write('dealers_all.csv', ['name', 'city', 'state', 'pincode', 'address', 'gstin'], all);
+  write('dealers_no_pincode.csv', ['name', 'city', 'state', 'gstin'], all.filter((r) => !r.pincode));
   console.log(`\nDealers: ${all.length} | without pincode: ${all.filter((r) => !r.pincode).length}`);
 })()
   .catch((e) => { console.error('FATAL:', e.message); process.exitCode = 1; })
