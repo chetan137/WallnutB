@@ -60,10 +60,10 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
       -- filled by tallybackend/sync_pincode_locations.js). One row per dealer name; the latest
       -- company that has a pincode wins.
       SELECT DISTINCT ON (l.name) l.name,
-             REGEXP_REPLACE(l.pincode, '[[:space:]]', '', 'g') AS pincode,
+             REGEXP_REPLACE(l.pincode, '[^0-9]', '', 'g') AS pincode,
              pl.state, pl.district, pl.city
       FROM ledgers l
-      JOIN pincode_locations pl ON pl.pincode = REGEXP_REPLACE(l.pincode, '[[:space:]]', '', 'g')
+      JOIN pincode_locations pl ON pl.pincode = REGEXP_REPLACE(l.pincode, '[^0-9]', '', 'g') AND pl.state IS NOT NULL
       ORDER BY l.name, l.company_id DESC
     ),
     voucher_ledger AS (

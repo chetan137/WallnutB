@@ -598,6 +598,10 @@ async function syncLedgers(company) {
       catch (e) { logger.warn(`[syncEngine] ledger contacts skipped "${company.name}": ${e.message}`); }
     }
 
+    // New pincodes -> State / District / City (only unmapped ones are looked up; no-op otherwise).
+    try { await require('../tally/pincodeLocations').syncPincodeLocations(); }
+    catch (e) { logger.warn(`[syncEngine] pincode lookup skipped: ${e.message}`); }
+
   } catch (err) {
     await syncLogs.failSync(companyId, 'ledgers', err.message);
     logger.error(`[syncEngine] ❌ LEDGERS FAILED "${company.name}": ${err.message}`);
