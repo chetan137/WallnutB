@@ -46,15 +46,26 @@ async function loadMonths(coId) {
     const total = Number(r.sales_cn_vouchers), withL = Number(r.with_sales_ledger);
     // Some credit notes legitimately post to no sales ledger, so allow a margin.
     const ratio = total ? withL / total : 0;
-    return { ...r, total, withL, status: ratio >= 0.7 ? 'NEW' : ratio > 0.05 ? 'partial' : 'old' };
+    return { ...r, total, withL, status: ratio >= 0.7 ? 'NEW' : ratio > 0.15 ? 'partial' : 'old' };
   });
 }
 
-// The backfill walks forward from 2025-04-01 in date order, so the "frontier"
-// is the last voucher date of the latest month that is NEW or partial.
+// The backfill walks forward from 2025-04-01 in date order, so what it has
+// re-fetched is the CONTIGUOUS run of NEW/partial months from the start. Months
+// further on that merely look partly "ledgered" (a few old vouchers already had a
+// sales ledger entry) must not count — the run stops at the first "old" month.
+function touchedRun(months) {
+  const run = [];
+  for (const m of months) {
+    if (m.status === 'old') { if (run.length) break; continue; }
+    run.push(m);
+  }
+  return run;
+}
+
 function frontierOf(months) {
-  const touched = months.filter((m) => m.status !== 'old');
-  return touched.length ? touched[touched.length - 1] : null;
+  const run = touchedRun(months);
+  return run.length ? run[run.length - 1] : null;
 }
 
 const daysBetween = (a, b) => Math.round((new Date(`${b}T00:00:00Z`) - new Date(`${a}T00:00:00Z`)) / 86400000);
@@ -101,7 +112,7 @@ async function main() {
       }
       console.log(`[${stamp}] reached ${f.last_voucher_date}  (month ${f.month}: ${f.status})  |  ${eta}`);
       // A month is complete once a LATER month has started (NEW or partial).
-      const touched = months.filter((m) => m.status !== 'old');
+      const touched = touchedRun(months);
       for (let i = 0; i < touched.length - 1; i++) {
         const m = touched[i].month;
         if (!announced.has(m) && touched[i].status === 'NEW') {
