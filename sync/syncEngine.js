@@ -279,8 +279,18 @@ async function syncVouchers(company) {
       const lastSynced = await syncLogs.getLastSyncedDate(companyId, 'vouchers');
       fromDate = subtractDays(lastSynced || toDate, config.sync.backfillDays);
     }
-    const chunks = buildDateChunks(fromDate, toDate);
-    logStep('VOUCHERS', `${initial_sync_done ? 'INCREMENTAL' : 'FULL BACKFILL'} | chunked ${fromDate} → ${toDate} into ${chunks.length} chunk(s)`);
+    // BUG FIX 4: for the CURRENT (non-historical) company the ad-hoc Voucher
+    // Collection is unusable — verified live on "Wallnut 25-26": it returns the
+    // same 54 vouchers (all dated 1-Apr-2025) for every requested period and
+    // none at all for the real Apr-Sep 2026 data, which Tally's own P&L report
+    // and mobile app both show is there. The "Voucher Register" REPORT obeys
+    // the requested period (see buildVoucherRegisterRequest in xmlTemplates.js), but
+    // returns each voucher's full native object (~70 KB each), so it is
+    // chunked at 2 days instead of 7. The closed historical company keeps the
+    // collection that is proven to work for it.
+    const useRegister = !is_historical;
+    const chunks = buildDateChunks(fromDate, toDate, useRegister ? 2 : 7);
+    logStep('VOUCHERS', `${initial_sync_done ? 'INCREMENTAL' : 'FULL BACKFILL'} | via ${useRegister ? 'Voucher Register' : 'Voucher Collection'} | chunked ${fromDate} → ${toDate} into ${chunks.length} chunk(s)`);
 
     let totalFetched = 0;
     let totalUpserted = 0;
@@ -293,12 +303,25 @@ async function syncVouchers(company) {
       try {
         logStep('VOUCHERS', `📡 ${chunkLabel} — sending to Tally...`);
         const fetchStart = Date.now();
-        const xml = templates.buildAllVouchersRequest(tallyName, chunkFrom, chunkTo);
+        const xml = useRegister
+          ? templates.buildVoucherRegisterRequest(tallyName, chunkFrom, chunkTo)
+          : templates.buildAllVouchersRequest(tallyName, chunkFrom, chunkTo);
         const raw = await tallyClient.request(xml);
         logStep('VOUCHERS', `📥 ${chunkLabel} — got ${humanBytes(raw.length)} in ${humanMs(Date.now() - fetchStart)}`);
 
         const parsed  = tallyClient.parseXml(raw);
-        const records = parsers.parseVouchers(parsed, companyId);
+        const allRecords = parsers.parseVouchers(parsed, companyId);
+        // Safety net: only keep vouchers dated inside this chunk. A source that
+        // ignores the requested period (like the stuck collection above) would
+        // otherwise re-upsert the same out-of-range vouchers on every chunk and
+        // be mistaken for real data.
+        const records = allRecords.filter((r) => r.date >= chunkFrom && r.date <= chunkTo);
+        if (records.length !== allRecords.length) {
+          logger.warn(`[syncEngine] ⚠️  VOUCHERS ${chunkLabel} "${company.name}": dropped ${allRecords.length - records.length} voucher(s) dated outside the chunk — Tally is not honouring the requested period.`);
+        }
+        if (allRecords.length === 0 && raw.includes('<VOUCHER ')) {
+          logger.warn(`[syncEngine] ⚠️  VOUCHERS ${chunkLabel} "${company.name}": response contains <VOUCHER> tags but the parser found none — response shape changed?`);
+        }
         logStep('VOUCHERS', `✅ ${chunkLabel} — parsed ${records.length} vouchers`);
         totalFetched += records.length;
 

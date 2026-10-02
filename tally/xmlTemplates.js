@@ -457,8 +457,53 @@ function buildEwayBillRequest(companyName, fromDate, toDate) {
 </ENVELOPE>`;
 }
 
+/**
+ * Fetch ALL vouchers (all types) in a date range via the "Voucher Register"
+ * REPORT — the fallback for a company whose ad-hoc Voucher Collection
+ * (buildAllVouchersRequest) is stuck.
+ *
+ * Verified live on the "Wallnut 25-26" company (debug_check_months_2526.js,
+ * debug_voucher_access_2526.js): the Voucher collection returned the same 54
+ * vouchers (all dated 1-Apr-2025) for EVERY requested period and nothing at
+ * all with no period, while Tally's own P&L report showed real Apr-Sep 2026
+ * sales matching its mobile app to the rupee. "Voucher Register" is a report,
+ * so it obeys SVFROMDATE/SVTODATE: Sep-2026 returned its 713 vouchers, every
+ * one dated inside the month.
+ *
+ * It returns each voucher's FULL native object (same shape parsers.js reads
+ * via IMPORTDATA > REQUESTDATA > TALLYMESSAGE > VOUCHER) — about 70 KB per
+ * voucher, ~50 MB for one month. Never request more than a couple of days at
+ * a time (see syncVouchers, which chunks it at 2 days) or Tally/memory will
+ * choke exactly like the whole-year collection did.
+ *
+ * @param {string} companyName  Exact Tally company name
+ * @param {string} fromDate     ISO "YYYY-MM-DD"
+ * @param {string} toDate       ISO "YYYY-MM-DD"
+ * @returns {string}
+ */
+function buildVoucherRegisterRequest(companyName, fromDate, toDate) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Voucher Register</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
+          <SVTODATE>${isoToTally(toDate)}</SVTODATE>
+          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+}
+
 module.exports = {
   buildAllVouchersRequest,
+  buildVoucherRegisterRequest,
   buildLedgerMasterRequest,
   buildStockItemsRequest,
   buildOutstandingRequest,
