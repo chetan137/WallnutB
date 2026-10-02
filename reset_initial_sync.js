@@ -48,6 +48,9 @@ async function main() {
   }
 
   await pool.query('UPDATE companies SET initial_sync_done = false WHERE id = $1', [matches[0].id]);
+  // Also drop the backfill resume cursor, otherwise the redo would continue from
+  // where the PREVIOUS backfill ended instead of starting over.
+  await pool.query(`DELETE FROM sync_logs WHERE company_id = $1 AND data_type = 'vouchers_backfill'`, [matches[0].id]);
   console.log(`\n✅ "${matches[0].name}": initial_sync_done set to false. No data was deleted.`);
   console.log('   Now start the sync:  pm2 restart tally-sync   (the next cycle does the full backfill)');
   await show('After:');

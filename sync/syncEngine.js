@@ -273,8 +273,16 @@ async function syncVouchers(company) {
     // history every time.
     const toDate = is_historical ? endOfFiscalYear(dbDateToIso(fiscal_year_from) || '2024-04-01') : todayIso();
     let fromDate;
+    let resumedFrom = null;   // cursor date if this full backfill is a resume
     if (!initial_sync_done) {
       fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
+      // RESUME: continue after the last finished chunk instead of chunk 1 (see
+      // syncLogs.getBackfillCursor) — a restart must not throw the work away.
+      const cursor = await syncLogs.getBackfillCursor(companyId);
+      if (cursor && cursor >= fromDate) {
+        fromDate    = subtractDays(cursor, -1);   // the day after the cursor
+        resumedFrom = cursor;
+      }
     } else {
       const lastSynced = await syncLogs.getLastSyncedDate(companyId, 'vouchers');
       fromDate = subtractDays(lastSynced || toDate, config.sync.backfillDays);
@@ -286,15 +294,19 @@ async function syncVouchers(company) {
     // and mobile app both show is there. The "Voucher Register" REPORT obeys
     // the requested period (see buildVoucherRegisterRequest in xmlTemplates.js), but
     // returns each voucher's full native object (~70 KB each), so it is
-    // chunked at 2 days instead of 7. The closed historical company keeps the
-    // collection that is proven to work for it.
+    // chunked at 1 day instead of 7 (a 2-day chunk is ~6-13 MB of XML whose
+    // parsed tree pushed the process toward pm2's memory limit). The closed
+    // historical company keeps the collection that is proven to work for it.
     const useRegister = !is_historical;
-    const chunks = buildDateChunks(fromDate, toDate, useRegister ? 2 : 7);
-    logStep('VOUCHERS', `${initial_sync_done ? 'INCREMENTAL' : 'FULL BACKFILL'} | via ${useRegister ? 'Voucher Register' : 'Voucher Collection'} | chunked ${fromDate} → ${toDate} into ${chunks.length} chunk(s)`);
+    const chunks = buildDateChunks(fromDate, toDate, useRegister ? 1 : 7);
+    logStep('VOUCHERS', `${initial_sync_done ? 'INCREMENTAL' : resumedFrom ? `RESUMING BACKFILL after ${resumedFrom}` : 'FULL BACKFILL'} | via ${useRegister ? 'Voucher Register' : 'Voucher Collection'} | chunked ${fromDate} → ${toDate} into ${chunks.length} chunk(s)`);
 
     let totalFetched = 0;
     let totalUpserted = 0;
     let anyChunkFailed = false;
+    // The resume cursor may only advance over an unbroken run of finished
+    // chunks — once one fails, later successes must not skip past it.
+    let cursorOk = true;
 
     for (let i = 0; i < chunks.length; i++) {
       const { from: chunkFrom, to: chunkTo } = chunks[i];
@@ -331,8 +343,10 @@ async function syncVouchers(company) {
           totalUpserted  += upserted;
           logStep('VOUCHERS', `💾 ${chunkLabel} — ${upserted}/${records.length} in DB (${humanMs(Date.now() - dbStart)})`);
         }
+        if (cursorOk && !initial_sync_done) await syncLogs.setBackfillCursor(companyId, chunkTo);
       } catch (chunkErr) {
         anyChunkFailed = true;
+        cursorOk = false;
         logger.error(`[syncEngine] ❌ VOUCHERS chunk FAILED ${chunkLabel} "${company.name}": ${chunkErr.message}`);
         // Keep going — a failed chunk shouldn't lose the chunks already fetched.
       }
@@ -347,7 +361,8 @@ async function syncVouchers(company) {
     // backfill "done" anyway — permanently skipping a historical company
     // from ever being retried, with its real data never fetched. Only mark
     // done on a full backfill that actually found at least one real record.
-    const suspiciousEmptyBackfill = !initial_sync_done && totalFetched === 0 && chunks.length > 0;
+    // (Not when resuming: the chunks before the cursor already had data.)
+    const suspiciousEmptyBackfill = !initial_sync_done && !resumedFrom && totalFetched === 0 && chunks.length > 0;
     if (suspiciousEmptyBackfill) {
       logger.warn(
         `[syncEngine] ⚠️  VOUCHERS full backfill for "${company.name}" got 0 records across all ` +
@@ -356,7 +371,10 @@ async function syncVouchers(company) {
       );
     }
     await syncLogs.successSync(companyId, 'vouchers', todayIso(), { fetched: totalFetched, upserted: totalUpserted });
-    if (!initial_sync_done && !anyChunkFailed && !suspiciousEmptyBackfill) await syncLogs.markInitialSyncDone(companyId);
+    if (!initial_sync_done && !anyChunkFailed && !suspiciousEmptyBackfill) {
+      await syncLogs.markInitialSyncDone(companyId);
+      await syncLogs.clearBackfillCursor(companyId);   // backfill finished — drop the resume cursor
+    }
     logStep(
       anyChunkFailed ? 'VOUCHERS ⚠️' : 'VOUCHERS ✅',
       `${totalUpserted}/${totalFetched} in DB across ${chunks.length} chunk(s)` +

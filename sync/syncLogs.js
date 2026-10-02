@@ -101,4 +101,43 @@ async function markInitialSyncDone(companyId) {
   logger.info(`[syncLogs] Company ${companyId}: initial_sync_done = true.`);
 }
 
-module.exports = { getLastSyncedDate, startSync, successSync, failSync, markInitialSyncDone };
+// ── Voucher backfill resume cursor ───────────────────────────────────────────
+// A full voucher backfill is hundreds of chunks. Without a cursor, any restart
+// (pm2 memory limit, crash, deploy) began again at chunk 1 — on the 25-26
+// company that meant it never got past ~24-Apr-2025. The cursor is the toDate
+// of the last chunk that finished with NO failed chunk before it, stored in
+// sync_logs under its own data_type so it never touches the real 'vouchers'
+// incremental row. Removed once the backfill completes.
+const BACKFILL_TYPE = 'vouchers_backfill';
+
+/** ISO date of the last finished backfill chunk, or null if none. */
+async function getBackfillCursor(companyId) {
+  const res = await pool.query(
+    `SELECT last_synced_date FROM sync_logs WHERE company_id = $1 AND data_type = $2`,
+    [companyId, BACKFILL_TYPE]
+  );
+  const val = res.rows[0]?.last_synced_date;
+  return val ? dbDateToIso(val) : null;
+}
+
+async function setBackfillCursor(companyId, isoDate) {
+  await pool.query(
+    `INSERT INTO sync_logs (company_id, data_type, status, last_synced_date, started_at)
+          VALUES ($1, $2, 'running', $3, NOW())
+     ON CONFLICT (company_id, data_type)
+     DO UPDATE SET last_synced_date = $3, status = 'running'`,
+    [companyId, BACKFILL_TYPE, isoDate]
+  );
+}
+
+async function clearBackfillCursor(companyId) {
+  await pool.query(
+    `DELETE FROM sync_logs WHERE company_id = $1 AND data_type = $2`,
+    [companyId, BACKFILL_TYPE]
+  );
+}
+
+module.exports = {
+  getLastSyncedDate, startSync, successSync, failSync, markInitialSyncDone,
+  getBackfillCursor, setBackfillCursor, clearBackfillCursor,
+};
