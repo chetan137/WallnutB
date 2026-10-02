@@ -24,23 +24,34 @@
  * these entries; totals are printed as stored, then as absolute values.
  *
  * Usage (in the tallybackend folder):
- *   node reconcile_sales_ledgers.js 25-26 [YYYY-MM for PART 2, default 2026-05]
+ *   node reconcile_sales_ledgers.js 25-26 [YYYY-MM for PART 2, default 2025-04]
+ *   Only compare a month once the backfill has re-fetched it (its Sales Accounts total
+ *   is then close to TALLY); the months the backfill has not reached yet still hold
+ *   the old data and will not match.
  */
 
 require('dotenv').config();
 const pool = require('./db/pool');
 
-// Tally P&L, company "…-2025-26": see reconcile_sales.js / debug_voucher_access_2526.js.
+// Tally P&L per month, company "…-2025-26" (excl. GST). Source:
+// debug_voucher_access_2526.js PART 1 — matches Tally's own mobile dashboard.
+// Months can be checked as soon as the backfill has re-fetched them.
 const TALLY_SALES = {
-  '2026-04': 3673215.21, '2026-05': 6754084.16, '2026-06': 7533439.05,
-  '2026-07': 6620483.37, '2026-08': 8004362.41,
+  '2025-04': 7806115.89, '2025-05': 7628581.79, '2025-06': 6328772.40, '2025-07': 7220744.34,
+  '2025-08': 7639718.55, '2025-09': 8145824.52, '2025-10': 7502430.24, '2025-11': 8152804.06,
+  '2025-12': 7542176.34, '2026-01': 7477302.40, '2026-02': 7728421.78, '2026-03': 9559016.73,
+  '2026-04': 3673215.21, '2026-05': 6754084.16, '2026-06': 7533439.05, '2026-07': 6620483.37,
+  '2026-08': 8004362.41,
 };
 const TALLY_BRANCH = {
-  '2026-04': 678630.75, '2026-05': 214910, '2026-06': 743285.29,
-  '2026-07': 330778.6, '2026-08': 316166.46,
+  '2025-04': 477057.03, '2025-05': 583539.15, '2025-06': 108191.06, '2025-07': 405582,
+  '2025-08': 525587.53, '2025-09': 266508.6, '2025-10': 266877.75, '2025-11': 540650.52,
+  '2025-12': 466654.2, '2026-01': 204261.6, '2026-02': 322520.77, '2026-03': 106349.02,
+  '2026-04': 678630.75, '2026-05': 214910, '2026-06': 743285.29, '2026-07': 330778.6,
+  '2026-08': 316166.46,
 };
 
-const [, , arg, detailMonth = '2026-05'] = process.argv;
+const [, , arg, detailMonth = '2025-04'] = process.argv;
 if (!arg) {
   console.error('Usage: node reconcile_sales_ledgers.js <company e.g. 25-26> [YYYY-MM]');
   process.exit(1);
