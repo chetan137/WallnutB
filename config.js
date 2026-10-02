@@ -82,6 +82,11 @@ const config = {
     // VM. Set SYNC_REFRESH_HISTORICAL=true ONLY while that company is the one open
     // in Tally, to refresh its reports/e-way bills once; then unset it again.
     refreshHistorical: process.env.SYNC_REFRESH_HISTORICAL === 'true',
+    // Restrict every sync cycle to the company whose name contains this text
+    // (e.g. SYNC_ONLY_COMPANY=24-25). Needed when ANOTHER company than the usual one is
+    // the one open in Tally: Tally answers for one company at a time, so the others
+    // must not be queried at all. Leave unset for normal operation.
+    onlyCompany: (process.env.SYNC_ONLY_COMPANY || '').trim(),
   },
 
   companies: parseCompanies(

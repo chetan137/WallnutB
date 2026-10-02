@@ -295,9 +295,13 @@ async function syncVouchers(company) {
     // the requested period (see buildVoucherRegisterRequest in xmlTemplates.js), but
     // returns each voucher's full native object (~70 KB each), so it is
     // chunked at 1 day instead of 7 (a 2-day chunk is ~6-13 MB of XML whose
-    // parsed tree pushed the process toward pm2's memory limit). The closed
-    // historical company keeps the collection that is proven to work for it.
-    const useRegister = !is_historical;
+    // parsed tree pushed the process toward pm2's memory limit).
+    // Every company now uses the Register. It was first limited to the current company
+    // because the closed 24-25 company "worked" with the collection — but the collection
+    // returns item invoices WITHOUT their sales ledger posting (Net Sales GST 18% …), so
+    // 24-25's Net Sales came out at Rs95 lakh against Tally's Rs8.94 Cr. The Register
+    // returns the full voucher, so a re-sync of 24-25 through it fixes that.
+    const useRegister = true;
     const chunks = buildDateChunks(fromDate, toDate, useRegister ? 1 : 7);
     logStep('VOUCHERS', `${initial_sync_done ? 'INCREMENTAL' : resumedFrom ? `RESUMING BACKFILL after ${resumedFrom}` : 'FULL BACKFILL'} | via ${useRegister ? 'Voucher Register' : 'Voucher Collection'} | chunked ${fromDate} → ${toDate} into ${chunks.length} chunk(s)`);
 
@@ -957,6 +961,12 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     logger.info(`[syncEngine]  ▶▶ COMPANY: "${company.name}"  (id=${company.id})`);
     logger.info(`[syncEngine]     historical=${company.is_historical} | initial_done=${company.initial_sync_done}`);
     logger.info(`[syncEngine] ────────────────────────────────────────────`);
+
+    // SYNC_ONLY_COMPANY: work on one company only (the one open in Tally right now).
+    if (config.sync.onlyCompany && !company.name.toLowerCase().includes(config.sync.onlyCompany.toLowerCase())) {
+      logger.info(`[syncEngine]   ⏭  SYNC_ONLY_COMPANY="${config.sync.onlyCompany}" — skipping "${company.name}"`);
+      continue;
+    }
 
     // Tally answers for ONE company at a time — the one open in its window — and
     // asking it for another company's data (here: 24-25 while 25-26 is open)
