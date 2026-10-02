@@ -204,7 +204,7 @@ async function upsertVoucherRecords(records) {
       const vRes = await client.query(
         `INSERT INTO vouchers (company_id,vch_no,date,vch_type,party_name,narration,total_amount,credit_period_label,credit_period_days)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (company_id,vch_no,vch_type)
+         ON CONFLICT (company_id,vch_no,vch_type,fy_start(date))
          DO UPDATE SET date=EXCLUDED.date, party_name=EXCLUDED.party_name,
            narration=EXCLUDED.narration, total_amount=EXCLUDED.total_amount,
            credit_period_label=EXCLUDED.credit_period_label, credit_period_days=EXCLUDED.credit_period_days,

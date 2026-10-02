@@ -95,6 +95,40 @@ CREATE TABLE IF NOT EXISTS vouchers (
 ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS credit_period_label TEXT;
 ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS credit_period_days  INTEGER;
 
+-- ─── Voucher identity includes the Financial Year ─────────────────────────────
+-- Voucher numbers of Payment / Receipt / Journal / Debit Note … are plain integers
+-- that Tally restarts every Financial Year (Receipt #1 again on 1-Apr-2026). With
+-- UNIQUE (company_id, vch_no, vch_type) the FY 26-27 vouchers silently OVERWROTE the
+-- FY 25-26 vouchers that had the same number — Apr-Aug 2025 kept only 14 of ~500
+-- receipts, ~Rs4.4Cr short of Tally's FY 25-26 Collection. (Sales vouchers carry the
+-- year in their number, e.g. WBSIMK-342/26-27, so they were never affected.)
+-- The key is now (company, number, type, financial year of the voucher's date).
+-- Idempotent; the old 3-column unique constraint is found by its columns, so its
+-- auto-generated name does not matter.
+CREATE OR REPLACE FUNCTION fy_start(d DATE) RETURNS INT
+  LANGUAGE sql IMMUTABLE AS
+$$ SELECT EXTRACT(YEAR FROM d)::int - CASE WHEN EXTRACT(MONTH FROM d) < 4 THEN 1 ELSE 0 END $$;
+
+DO $$
+DECLARE c RECORD;
+BEGIN
+  FOR c IN
+    SELECT con.conname
+    FROM pg_constraint con
+    WHERE con.conrelid = 'vouchers'::regclass
+      AND con.contype  = 'u'
+      AND (SELECT array_agg(att.attname::text ORDER BY att.attname::text)
+           FROM pg_attribute att
+           WHERE att.attrelid = con.conrelid AND att.attnum = ANY (con.conkey))
+          = ARRAY['company_id', 'vch_no', 'vch_type']
+  LOOP
+    EXECUTE format('ALTER TABLE vouchers DROP CONSTRAINT %I', c.conname);
+  END LOOP;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS vouchers_company_vchno_type_fy_uq
+  ON vouchers (company_id, vch_no, vch_type, fy_start(date));
+
 -- ─── Voucher Ledger Entries ────────────────────────────────────────────────────
 -- The debit/credit ledger lines within each voucher.
 CREATE TABLE IF NOT EXISTS voucher_ledger_entries (
