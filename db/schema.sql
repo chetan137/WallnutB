@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS ledgers (
   UNIQUE (company_id, name)
 );
 
+-- Contact fields from the Tally ledger master (additive; also created by tally/ledgerContacts.js)
+ALTER TABLE ledgers
+  ADD COLUMN IF NOT EXISTS address TEXT, ADD COLUMN IF NOT EXISTS pincode TEXT,
+  ADD COLUMN IF NOT EXISTS country TEXT, ADD COLUMN IF NOT EXISTS mailing_name TEXT,
+  ADD COLUMN IF NOT EXISTS gst_registration_type TEXT, ADD COLUMN IF NOT EXISTS phone TEXT,
+  ADD COLUMN IF NOT EXISTS email TEXT, ADD COLUMN IF NOT EXISTS contact_person TEXT;
+
 -- ─── Stock Items (Product Master) ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS stock_items (
   id               SERIAL PRIMARY KEY,

@@ -170,7 +170,8 @@ async function streamParseLedgers(responseStream, companyId, onProgress) {
       // closing_balance is computed post-sync as: opening_balance + SUM(voucher_ledger_entries)
       const openingBalance = parseFloat(raw.OPENINGBALANCE) || 0;
       const gstNo          = String(raw.PARTYGSTIN || raw.GSTREGISTRATIONNUMBER || raw.GSTIN || '').trim();
-      const state          = String(raw.STATENAME || raw.STATE || '').trim();
+      const stateRaw       = String(raw.STATENAME || raw.STATE || '').replace(//g, '').trim();
+      const state          = /^any$/i.test(stateRaw) ? null : stateRaw;   // Tally's " Any" -> NULL
 
       if (!name) return; // skip empty
       records.push({ companyId, name, parentGroup, openingBalance, gstNo, state });

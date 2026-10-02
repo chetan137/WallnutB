@@ -591,6 +591,13 @@ async function syncLedgers(company) {
     await syncLogs.successSync(companyId, 'ledgers', todayIso(), { fetched: records.length, upserted });
     logStep('LEDGERS ✅', `${upserted} in DB | DB write: ${humanMs(Date.now()-dbStart)} | total: ${humanMs(Date.now()-t0)}`);
 
+    // Contact fields (address, pincode, …). Current company only — historical years are filled by
+    // sync_ledger_contacts.js. Never fails the ledger sync.
+    if (!is_historical) {
+      try { await require('../tally/ledgerContacts').syncLedgerContacts(company); }
+      catch (e) { logger.warn(`[syncEngine] ledger contacts skipped "${company.name}": ${e.message}`); }
+    }
+
   } catch (err) {
     await syncLogs.failSync(companyId, 'ledgers', err.message);
     logger.error(`[syncEngine] ❌ LEDGERS FAILED "${company.name}": ${err.message}`);
