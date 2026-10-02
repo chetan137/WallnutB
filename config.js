@@ -76,6 +76,12 @@ const config = {
     intervalMinutes: parseInt(process.env.SYNC_INTERVAL_MINUTES, 10) || 10,
     masterSyncHour:  parseInt(process.env.MASTER_SYNC_HOUR, 10) || 2,
     backfillDays:    parseInt(process.env.BACKFILL_DAYS, 10) || 3,
+    // A closed (historical) company that is already fully synced is NOT touched
+    // in Tally any more. Tally serves one company at a time (the one open in its
+    // window) and asking it for a different company's data crashed Tally on this
+    // VM. Set SYNC_REFRESH_HISTORICAL=true ONLY while that company is the one open
+    // in Tally, to refresh its reports/e-way bills once; then unset it again.
+    refreshHistorical: process.env.SYNC_REFRESH_HISTORICAL === 'true',
   },
 
   companies: parseCompanies(

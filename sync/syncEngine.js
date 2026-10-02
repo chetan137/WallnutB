@@ -958,6 +958,16 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     logger.info(`[syncEngine]     historical=${company.is_historical} | initial_done=${company.initial_sync_done}`);
     logger.info(`[syncEngine] ────────────────────────────────────────────`);
 
+    // Tally answers for ONE company at a time — the one open in its window — and
+    // asking it for another company's data (here: 24-25 while 25-26 is open)
+    // crashed Tally, after which every request in the cycle was refused. A
+    // closed historical company that already finished its sync has nothing new
+    // to fetch, so leave Tally alone for it (see config.sync.refreshHistorical).
+    if (company.is_historical && company.initial_sync_done && !config.sync.refreshHistorical) {
+      logger.info(`[syncEngine]   ⏭  Historical + fully synced — not contacting Tally for "${company.name}" (set SYNC_REFRESH_HISTORICAL=true while it is the open company to refresh it)`);
+      continue;
+    }
+
     // ── Step A: Always run for ALL companies (fast report-based, no big data) ──
     // These are small (~1-70KB) point-in-time reports from Tally.
     // Must run even for historical companies to keep snapshot fresh.
