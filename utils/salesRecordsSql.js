@@ -13,29 +13,28 @@
  * WHY LEDGER POSTINGS, NOT ITEM LINES
  * Tally's "Sales" (P&L / mobile dashboard) is the net of every posting to the
  * ledgers of the "Sales Accounts" group; "Branch Trf-Sales" is a separate group
- * that Tally keeps out of Sales. Verified month by month on the 25-26 company
- * (reconcile_sales_ledgers.js): summing those postings equals Tally to the rupee
- * for 14 of 17 months (the rest within ₹35k), while the old figure — the sum of
- * item-line amounts of Sales + Credit Note vouchers — was ₹3-20 lakh/month higher
- * (credit notes were added instead of subtracted, and item lines differ from the
- * ledger postings). So per voucher:
+ * that Tally keeps out of Sales. Verified on both companies (reconcile_sales_ledgers.js,
+ * diagnose_sales_by_type.js): the postings of all voucher types add up to Tally's P&L
+ * to within 0.01% (FY 24-25: 8,94,20,345 vs 8,94,31,810; Branch exactly), while the old
+ * figure — the sum of item-line amounts of Sales + Credit Note vouchers — was 3-20 lakh a
+ * month higher (credit notes were added, not subtracted).
+ *
+ * Per voucher (Sales, Credit Note and Debit Note types — the only types that post to
+ * these groups in this data):
  *
  *   category  branch_transfer  has a posting in a "Branch Trf…Sales" group ledger
- *                              (fallback, only if the voucher has NO sales-group
- *                              posting at all: its party is one of the company's own
- *                              branch ledgers)
  *             sample           voucher type "Promotional Invoice", or a free-goods
  *                              ledger (Free Gift / Free Promotional Iteam /
  *                              Sample Sale / Free Sample / Free Samples -Customer)
- *             sale             everything else
+ *             sale             has a posting in a "Sales Accounts" group ledger
+ *             other            posts to neither group: NOT sales in Tally, so it is
+ *                              dropped (no item-total fallback — that fallback added
+ *                              ~80 lakh of non-sales vouchers to FY 24-25)
  *   voucher amount (excl. GST)
- *             sale             Σ postings to "Sales Accounts" ledgers — credit notes
- *                              come out negative, so they reduce sales exactly as in
- *                              Tally. No such posting: a credit note counts 0 (it only
- *                              touched expense ledgers); a sales voucher falls back to
- *                              its item total (old-format rows without ledger entries).
- *             branch_transfer  Σ postings to the branch Sales group (else item total)
- *             sample           item total
+ *             sale             Σ postings to "Sales Accounts" ledgers — credit notes come
+ *                              out negative, debit notes positive, as in Tally
+ *             branch_transfer  Σ postings to the "Branch Trf…Sales" ledgers
+ *             sample           item total (display only)
  *   The voucher amount is spread over its item lines in proportion to each line's
  *   amount, so item / dealer / officer / state breakdowns still add up to it.
  *   Quantity of a net-negative voucher (a credit note) is negative.
@@ -57,7 +56,7 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
       JOIN vouchers v ON v.id = e.voucher_id
       JOIN ledgers  l ON l.company_id = v.company_id AND l.name = e.ledger_name
       WHERE v.is_cancelled = false
-        AND (LOWER(v.vch_type) LIKE 'sales%' OR LOWER(v.vch_type) LIKE 'credit note%')
+        AND (LOWER(v.vch_type) LIKE 'sales%' OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
         ${companyFilter}
         ${dateFilter}
       GROUP BY e.voucher_id
@@ -65,21 +64,16 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
     voucher_category AS (
       SELECT b.*,
              CASE b.category
-               WHEN 'branch_transfer' THEN COALESCE(b.branch_amt, b.item_total, b.total_amount)
+               WHEN 'branch_transfer' THEN b.branch_amt
                WHEN 'sample'          THEN COALESCE(b.item_total, b.total_amount)
-               ELSE COALESCE(
-                      b.sales_amt,
-                      CASE WHEN b.vch_type ILIKE 'credit note%' THEN 0
-                           ELSE COALESCE(b.item_total, b.total_amount) END)
+               WHEN 'sale'            THEN b.sales_amt
+               ELSE 0
              END AS v_amt
       FROM (
         SELECT v.id, v.vch_type, v.total_amount,
                vl.sales_amt, vl.branch_amt, vi.item_total, vi.item_count,
                CASE
                  WHEN vl.branch_amt IS NOT NULL THEN 'branch_transfer'
-                 WHEN vl.sales_amt IS NULL
-                      AND (pl.parent_group ILIKE '%Branch Trf%' OR pl.parent_group ILIKE 'Branch / Divisions')
-                   THEN 'branch_transfer'
                  WHEN v.vch_type ILIKE 'promotional invoice%'
                       OR EXISTS (
                         SELECT 1 FROM voucher_ledger_entries e
@@ -87,17 +81,17 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
                           AND e.ledger_name ILIKE ANY (ARRAY['free gift%', 'free promotional%', 'free sample%', 'sample sale%'])
                       )
                    THEN 'sample'
-                 ELSE 'sale'
+                 WHEN vl.sales_amt IS NOT NULL THEN 'sale'
+                 ELSE 'other'
                END AS category
         FROM vouchers v
         LEFT JOIN voucher_ledger vl ON vl.voucher_id = v.id
-        LEFT JOIN ledgers pl ON pl.company_id = v.company_id AND pl.name = v.party_name
         LEFT JOIN LATERAL (
           SELECT SUM(x.amount) AS item_total, COUNT(*) AS item_count
           FROM voucher_inventory_entries x WHERE x.voucher_id = v.id
         ) vi ON true
         WHERE v.is_cancelled = false
-          AND (LOWER(v.vch_type) LIKE 'sales%' OR LOWER(v.vch_type) LIKE 'credit note%')
+          AND (LOWER(v.vch_type) LIKE 'sales%' OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
           ${companyFilter}
           ${dateFilter}
       ) b
