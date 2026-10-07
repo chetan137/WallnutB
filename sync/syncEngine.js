@@ -448,9 +448,20 @@ async function upsertEwayBillRecords(records) {
  * skipped on every run after the first successful one, same reasoning as
  * runSyncCycle's historical-skip for vouchers/masters.
  */
+// e-Way bills are optional compliance data. When Tally does not answer them (every request
+// timed out for hours on 2026-10-07) give up quickly and do not try again for a while, so they
+// can never hold up the voucher sync.
+const EWAY_MAX_CONSECUTIVE_FAILURES = 2;
+const EWAY_BACKOFF_MS = 3 * 60 * 60 * 1000;
+const ewayBackoffUntil = new Map();   // companyId -> timestamp
+
 async function syncEwayBills(company) {
   const { id: companyId, tally_name: tallyName, fiscal_year_from, is_historical } = company;
   const t0 = Date.now();
+  if ((ewayBackoffUntil.get(companyId) || 0) > t0) {
+    logStep('EWAY BILLS', `⏭  Tally did not answer e-Way requests recently — next try after ${new Date(ewayBackoffUntil.get(companyId)).toISOString()}`);
+    return;
+  }
   logStep('EWAY BILLS', `start — company: "${company.name}"`);
   await syncLogs.startSync(companyId, 'eway_bills');
 
@@ -474,6 +485,8 @@ async function syncEwayBills(company) {
     let totalFetched  = 0;
     let totalUpserted = 0;
     let anyChunkFailed = false;
+    let consecutiveFailures = 0;
+    let aborted = false;
 
     for (let i = 0; i < chunks.length; i++) {
       const { from: chunkFrom, to: chunkTo } = chunks[i];
@@ -483,7 +496,8 @@ async function syncEwayBills(company) {
         logStep('EWAY BILLS', `📡 ${chunkLabel} — sending to Tally...`);
         const fetchStart = Date.now();
         const xml = templates.buildEwayBillRequest(tallyName, chunkFrom, chunkTo);
-        const raw = await tallyClient.request(xml);
+        const raw = await tallyClient.request(xml, 1);   // one attempt: a timeout is not worth 3 x 2 minutes
+        consecutiveFailures = 0;
         logStep('EWAY BILLS', `📥 ${chunkLabel} — got ${humanBytes(raw.length)} in ${humanMs(Date.now() - fetchStart)}`);
 
         const parsed  = tallyClient.parseXml(raw);
@@ -499,8 +513,21 @@ async function syncEwayBills(company) {
         }
       } catch (chunkErr) {
         anyChunkFailed = true;
+        consecutiveFailures++;
         logger.error(`[syncEngine] ❌ EWAY BILLS chunk FAILED ${chunkLabel} "${company.name}": ${chunkErr.message}`);
+        if (consecutiveFailures >= EWAY_MAX_CONSECUTIVE_FAILURES) {
+          aborted = true;
+          break;
+        }
       }
+    }
+
+    if (aborted) {
+      // Not a success: the next real attempt must start again from the same point.
+      ewayBackoffUntil.set(companyId, Date.now() + EWAY_BACKOFF_MS);
+      await syncLogs.failSync(companyId, 'eway_bills', `Tally did not answer ${EWAY_MAX_CONSECUTIVE_FAILURES} e-Way requests in a row — paused for 3 hours`);
+      logStep('EWAY BILLS ⚠️', `stopped after ${EWAY_MAX_CONSECUTIVE_FAILURES} failed requests — paused for 3 hours (vouchers are not affected)`);
+      return;
     }
 
     await syncLogs.successSync(companyId, 'eway_bills', todayIso(), { fetched: totalFetched, upserted: totalUpserted });
@@ -989,6 +1016,14 @@ async function runSyncCycle({ includeMasters = false } = {}) {
       continue;
     }
 
+    // ── Step 0: Vouchers FIRST ───────────────────────────────────────────────
+    // The dashboard lives on these. They used to run after the report snapshots and e-Way bills,
+    // so one hung Tally report (e-Way bills timed out for hours on 2026-10-07) kept new invoices
+    // from reaching the dashboard. Now nothing can delay them.
+    if (!(company.is_historical && company.initial_sync_done)) {
+      await syncVouchers(company);
+    }
+
     // ── Step A: Always run for ALL companies (fast report-based, no big data) ──
     // These are small (~1-70KB) point-in-time reports from Tally.
     // Must run even for historical companies to keep snapshot fresh.
@@ -1013,8 +1048,7 @@ async function runSyncCycle({ includeMasters = false } = {}) {
 
     const compStart = Date.now();
 
-    // ── Step C: Vouchers ─────────────────────────────────────────────────────
-    await syncVouchers(company);
+    // ── Step C: Vouchers — already synced first (Step 0) ─────────────────────
 
     // ── Step D: Masters (startup/daily OR first-ever sync) ───────────────────
     if (includeMasters || !company.initial_sync_done) {
