@@ -28,12 +28,12 @@ const inr = (n) => Math.round(Number(n || 0)).toLocaleString('en-IN');
       WHERE v.is_cancelled = false
         AND ((LOWER(v.vch_type) LIKE 'sales%' AND LOWER(v.vch_type) NOT LIKE 'sales order%') OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
     ), grp AS (
-      SELECT *, COUNT(*) OVER w AS n, COUNT(DISTINCT vch_type) OVER w AS types, MAX(synced_at) OVER w AS newest
+      SELECT *, COUNT(*) OVER w AS n, (MIN(vch_type) OVER w <> MAX(vch_type) OVER w) AS multi_type, MAX(synced_at) OVER w AS newest
       FROM base WINDOW w AS (PARTITION BY company_id, vch_no, date, party_name, total_amount)
     )
     SELECT company, vch_no, vch_type, date::text AS date, party_name, total_amount, sales_posting, synced_at::text AS synced_at,
            (synced_at < newest) AS stale, fy_start(date) AS fy
-    FROM grp WHERE n > 1 AND types > 1
+    FROM grp WHERE n > 1 AND multi_type
     ORDER BY date, vch_no, synced_at`);
 
   const stale = rows.filter((r) => r.stale);
