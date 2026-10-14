@@ -64,4 +64,11 @@ const request = (from, to) => `<?xml version="1.0" encoding="UTF-8"?>
   const ca = rows.find((r) => /^current assets$/i.test(r.name));
   console.log(ca ? `Balance Sheet "Current Assets": main ${fmt(ca.main)}  (Tally figure on your screenshot: 4,22,48,728.47)` : 'No "Current Assets" line found.');
 })()
-  .catch((e) => { console.error('FATAL:', e.message); process.exitCode = 1; });
+  .catch((e) => {
+    // Node 22 gives an EMPTY message for a refused connection (AggregateError) — show the code.
+    const code = e.code || (e.errors && e.errors[0] && e.errors[0].code) || '';
+    console.error('FATAL:', e.message || '(no message)', code ? `[${code}]` : '');
+    if (/ECONNREFUSED|ECONNRESET/.test(code)) console.error('Tally is not accepting connections on its XML port: is TallyPrime open, with this company loaded and the XML server on (port 9006)?');
+    if (/ECONNABORTED|ETIMEDOUT/.test(code) || /timeout/i.test(e.message || '')) console.error('Tally did not answer in time: it may be busy (a report open or still calculating).');
+    process.exitCode = 1;
+  });
