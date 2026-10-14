@@ -57,6 +57,25 @@ async function dbPart(co) {
     const g = groups.find((x) => x.group_name.toLowerCase() === name.toLowerCase());
     return { tally_item: name, tally: fmt(v), db_group: g ? g.group_name : '-', db_net: g ? fmt(Math.abs(g.net_balance)) : '-' };
   }));
+  // Stock: the Trial Balance carries the Stock-in-Hand LEDGER (usually the opening stock); the Tally
+  // Balance Sheet uses the calculated CLOSING stock (= the sum of the stock items' closing values).
+  const { rows: stockLedgers } = await pool.query(
+    `SELECT name, parent_group, opening_balance, closing_balance FROM ledgers
+     WHERE company_id = $1 AND (parent_group ILIKE 'stock%' OR name ILIKE '%stock-in-hand%' OR name ILIKE 'closing stock%' OR name ILIKE 'opening stock%')
+     ORDER BY ABS(opening_balance) DESC LIMIT 10`, [co.id]);
+  console.log('\n── Stock ledgers (what the Trial Balance can carry)');
+  console.table(stockLedgers.map((r) => ({ ledger: r.name, group: r.parent_group, opening_balance: fmt(r.opening_balance), closing_balance: fmt(r.closing_balance) })));
+  const { rows: [st] } = await pool.query(
+    'SELECT COUNT(*) AS items, COALESCE(SUM(closing_value), 0) AS closing_value, MAX(synced_at)::text AS synced_at FROM stock_items WHERE company_id = $1', [co.id]);
+  console.log(`\nStock items in the DB: ${st.items} | sum of closing_value = ${fmt(st.closing_value)} (synced ${String(st.synced_at).slice(0, 19)})`);
+  console.log(`Tally Balance Sheet "Closing Stock"                 = ${fmt(15813097.84)}`);
+  if (ca) {
+    const gap = TALLY.reduce((s, [, v]) => s + v, 0) - Math.abs(ca.net_balance);
+    console.log(`Gap to explain (Tally - website)                    = ${fmt(gap)}`);
+    console.log(`Closing stock (DB) minus website gap check          : if the Trial Balance holds opening stock S, then`);
+    console.log(`   website + (closing stock - S) should equal Tally. Closing stock - gap = ${fmt(Number(st.closing_value) - gap)}  <- the stock figure inside the Trial Balance if that holds`);
+  }
+
   console.log('\nHow to read: if the newest period_to is OLDER than the date of your Tally figure, the website is');
   console.log('showing an old snapshot (the Trial Balance sync is not updating). If the dates match, the gap is');
   console.log('in how Tally and the Trial Balance count Closing Stock — compare the Stock-in-Hand line above.');
