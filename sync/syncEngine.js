@@ -122,6 +122,43 @@ async function syncTrialBalance(company) {
   }
 }
 
+/**
+ * Balance Sheet group totals straight from Tally's Balance Sheet report. The Trial Balance carries the
+ * Stock-in-Hand LEDGER, the Balance Sheet carries the calculated Closing Stock, so only the Balance
+ * Sheet's "Current Assets" equals what Tally shows (Trial Balance was ~19-25 lakh lower).
+ */
+async function syncBalanceSheet(company) {
+  const { id: companyId, tally_name: tallyName, fiscal_year_from, is_historical } = company;
+  const t0 = Date.now();
+  logStep('BALANCE SHEET', `start — company: "${company.name}"`);
+  try {
+    const fromDate = dbDateToIso(fiscal_year_from) || '2024-04-01';
+    const toDate = is_historical ? endOfFiscalYear(fromDate) : todayIso();
+    const raw = await tallyClient.request(templates.buildBalanceSheetRequest(tallyName, fromDate, toDate), 1);
+
+    const decode = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#13;&#10;|&#10;/g, ' ').trim();
+    const rows = [...raw.matchAll(/<BSNAME>([\s\S]*?)<\/BSNAME>\s*<BSAMT>([\s\S]*?)<\/BSAMT>/g)].map((m) => ({
+      name: decode((m[1].match(/<DSPDISPNAME>([^<]*)<\/DSPDISPNAME>/) || [])[1] || ''),
+      main: parseFloat((m[2].match(/<BSMAINAMT>([^<]*)<\/BSMAINAMT>/) || [])[1]) || 0,
+    })).filter((r) => r.name);
+    if (!rows.length) { logStep('BALANCE SHEET', '⚠️  no groups found in Tally response'); return; }
+
+    await withTransaction(async (client) => {
+      for (const r of rows) {
+        await client.query(
+          `INSERT INTO balance_sheet_groups (company_id, group_name, main_amount, period_from, period_to, synced_at)
+           VALUES ($1,$2,$3,$4,$5,NOW())
+           ON CONFLICT (company_id, group_name, period_from, period_to)
+           DO UPDATE SET main_amount = EXCLUDED.main_amount, synced_at = NOW()`,
+          [companyId, r.name, r.main, fromDate, toDate]);
+      }
+    });
+    logStep('BALANCE SHEET ✅', `${rows.length} groups stored | ${humanMs(Date.now() - t0)}`);
+  } catch (err) {
+    logger.error(`[syncEngine] ❌ BALANCE SHEET FAILED "${company.name}": ${err.message || err.code || 'no message'}`);
+  }
+}
+
 /** Returns the last day of the fiscal year that started in fromDate (Indian FY: ends Mar 31) */
 function endOfFiscalYear(fromDate) {
   const d = new Date(fromDate);
@@ -1027,7 +1064,8 @@ async function runSyncCycle({ includeMasters = false } = {}) {
     // ── Step A: Always run for ALL companies (fast report-based, no big data) ──
     // These are small (~1-70KB) point-in-time reports from Tally.
     // Must run even for historical companies to keep snapshot fresh.
-    await syncTrialBalance(company);        // Balance Sheet group totals
+    await syncTrialBalance(company);        // Trial Balance group totals
+    await syncBalanceSheet(company);        // Balance Sheet group totals (incl. Closing Stock)
     await syncProfitAndLoss(company);       // P&L line items (Sales/Purchase/Expenses)
     await syncBillsPayable(company);        // Vendor bills + overdue (snapshot, no dates needed)
     await syncBillsReceivable(company);     // Customer bills + overdue (snapshot, no dates needed)
@@ -1074,5 +1112,5 @@ module.exports = {
   runSyncCycle,
   syncVouchers, syncLedgers, syncStockItems, syncEwayBills,
   syncOutstanding, syncBillsPayable, syncBillsReceivable,
-  syncReceiptsAndPayments, syncTrialBalance, syncProfitAndLoss,
+  syncReceiptsAndPayments, syncTrialBalance, syncBalanceSheet, syncProfitAndLoss,
 };

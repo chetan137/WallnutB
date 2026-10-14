@@ -269,6 +269,26 @@ function buildOutstandingRequest(companyName) {
  * @param {string} toDate    ISO "YYYY-MM-DD"
  * @returns {string}
  */
+function buildBalanceSheetRequest(companyName, fromDate, toDate) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Balance Sheet</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVFROMDATE>${isoToTally(fromDate)}</SVFROMDATE>
+          <SVTODATE>${isoToTally(toDate)}</SVTODATE>
+          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+}
+
 function buildTrialBalanceRequest(companyName, fromDate, toDate) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -508,6 +528,7 @@ module.exports = {
   buildStockItemsRequest,
   buildOutstandingRequest,
   buildTrialBalanceRequest,
+  buildBalanceSheetRequest,
   buildOutstandingPayablesRequest,
   buildProfitAndLossRequest,
   buildBillsReceivableRequest,

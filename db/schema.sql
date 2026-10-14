@@ -272,6 +272,20 @@ CREATE TABLE IF NOT EXISTS cash_flow_items (
 --   Fixed Assets         → Balance Sheet
 --   Loans (Liability)    → Balance Sheet / Debt-Equity ratio
 --   Capital Account      → Balance Sheet / Equity
+-- Tally's BALANCE SHEET report (group totals). Unlike the Trial Balance it includes the calculated
+-- Closing Stock, so its "Current Assets" is the figure Tally shows on screen. Assets are negative
+-- (Cr-positive / Dr-negative), liabilities positive. Filled by syncBalanceSheet().
+CREATE TABLE IF NOT EXISTS balance_sheet_groups (
+  id          SERIAL PRIMARY KEY,
+  company_id  INT  NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  group_name  TEXT NOT NULL,
+  main_amount NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  period_from DATE NOT NULL,
+  period_to   DATE NOT NULL,
+  synced_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, group_name, period_from, period_to)
+);
+
 CREATE TABLE IF NOT EXISTS trial_balance_groups (
   id           SERIAL PRIMARY KEY,
   company_id   INT   NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
