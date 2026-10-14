@@ -47,6 +47,19 @@
  * old state and have an empty district / city.
  */
 
+// A voucher the sync stored under an OLD voucher type is left behind when Tally later shows the same
+// voucher under another type (e.g. Nuvoni WBSI-003/24-25: "Sales-Bhiwandi" saved 5 Sep without its main
+// sales posting, "Sales-Maharashtra" saved 3 Oct by the full re-read). Same company, number, date, party
+// and total, same kind of voucher, and a copy that is more than a day newer -> this row is the stale one.
+const NOT_STALE_COPY = `
+          AND NOT EXISTS (
+            SELECT 1 FROM vouchers v2
+            WHERE v2.company_id = v.company_id AND v2.vch_no = v.vch_no AND v2.date = v.date
+              AND v2.party_name = v.party_name AND v2.total_amount = v.total_amount
+              AND v2.vch_type <> v.vch_type AND v2.is_cancelled = false
+              AND LEFT(LOWER(v2.vch_type), 5) = LEFT(LOWER(v.vch_type), 5)
+              AND v2.synced_at > v.synced_at + INTERVAL '1 day')`;
+
 /**
  * @param {{ companyFilter?: string, dateFilter?: string }} filters
  *   SQL fragments that start with " AND …" and use the alias "v" (vouchers),
@@ -66,6 +79,23 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
       JOIN pincode_locations pl ON pl.pincode = REGEXP_REPLACE(l.pincode, '[^0-9]', '', 'g') AND pl.state IS NOT NULL
       ORDER BY l.name, l.company_id DESC
     ),
+    -- Pending bills as on today. Tally's current-year company lists EVERY pending bill, including those of
+    -- earlier years; the closed year's own copy is an old snapshot (it still lists bills that were paid
+    -- since), so only the current (not historical) company's bills are used, one row per party + bill.
+    current_bills AS (
+      SELECT DISTINCT ON (b.party_name, b.bill_ref) b.party_name, b.bill_ref, b.amount, b.due_date
+      FROM bills_receivable b JOIN companies c ON c.id = b.company_id
+      WHERE c.is_historical = false OR NOT EXISTS (SELECT 1 FROM companies WHERE is_historical = false)
+      ORDER BY b.party_name, b.bill_ref, c.id DESC, b.synced_at DESC
+    ),
+    -- If the same bill number is on more than one voucher row, only the newest row carries the amount.
+    bill_owner AS (
+      SELECT DISTINCT ON (v.party_name, v.vch_no) v.id
+      FROM vouchers v
+      WHERE v.is_cancelled = false
+        AND ((LOWER(v.vch_type) LIKE 'sales%' AND LOWER(v.vch_type) NOT LIKE 'sales order%') OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
+      ORDER BY v.party_name, v.vch_no, v.synced_at DESC, v.id DESC
+    ),
     voucher_ledger AS (
       SELECT e.voucher_id,
              SUM(e.amount) FILTER (WHERE l.parent_group = 'Sales Accounts')        AS sales_amt,
@@ -75,6 +105,7 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
       JOIN ledgers  l ON l.company_id = v.company_id AND l.name = e.ledger_name
       WHERE v.is_cancelled = false
         AND ((LOWER(v.vch_type) LIKE 'sales%' AND LOWER(v.vch_type) NOT LIKE 'sales order%') OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
+        ${NOT_STALE_COPY}
         ${companyFilter}
         ${dateFilter}
       GROUP BY e.voucher_id
@@ -110,6 +141,7 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
         ) vi ON true
         WHERE v.is_cancelled = false
           AND ((LOWER(v.vch_type) LIKE 'sales%' AND LOWER(v.vch_type) NOT LIKE 'sales order%') OR LOWER(v.vch_type) LIKE 'credit note%' OR LOWER(v.vch_type) LIKE 'debit note%')
+          ${NOT_STALE_COPY}
           ${companyFilter}
           ${dateFilter}
       ) b
@@ -163,8 +195,9 @@ function buildSalesRecordsSql({ companyFilter = '', dateFilter = '' } = {}) {
     LEFT JOIN voucher_inventory_entries vie ON vie.voucher_id = v.id
     LEFT JOIN stock_items si
       ON si.company_id = v.company_id AND si.name = vie.item_name
-    LEFT JOIN bills_receivable br
-      ON br.company_id = v.company_id AND br.party_name = v.party_name AND br.bill_ref = v.vch_no
+    LEFT JOIN bill_owner bo ON bo.id = v.id
+    LEFT JOIN current_bills br
+      ON bo.id IS NOT NULL AND br.party_name = v.party_name AND br.bill_ref = v.vch_no
     LEFT JOIN ledgers l
       ON l.company_id = v.company_id AND l.name = v.party_name
     LEFT JOIN dealer_loc dl ON dl.name = v.party_name
